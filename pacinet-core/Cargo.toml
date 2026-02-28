@@ -1,0 +1,13 @@
+[package]
+name = "pacinet-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pacinet-proto = { workspace = true }
+tonic = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

@@ -1,0 +1,232 @@
+syntax = "proto3";
+package pacinet;
+
+import "google/protobuf/timestamp.proto";
+
+// ============================================================================
+// PaciNetController — southbound: agent → controller
+// ============================================================================
+
+service PaciNetController {
+  // Agent registers itself with the controller on startup
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+
+  // Periodic health check from agent
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Agent pushes counter data to controller
+  rpc ReportCounters(ReportCountersRequest) returns (ReportCountersResponse);
+}
+
+// ============================================================================
+// PaciNetAgent — southbound: controller → agent
+// ============================================================================
+
+service PaciNetAgent {
+  // Push YAML rules + compile options to agent
+  rpc DeployRules(DeployRulesRequest) returns (DeployRulesResponse);
+
+  // Request counter snapshot from agent
+  rpc GetCounters(GetCountersRequest) returns (GetCountersResponse);
+
+  // Request node status from agent
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+
+// ============================================================================
+// PaciNetManagement — northbound: CLI → controller
+// ============================================================================
+
+service PaciNetManagement {
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc RemoveNode(RemoveNodeRequest) returns (RemoveNodeResponse);
+
+  rpc DeployPolicy(DeployPolicyRequest) returns (DeployPolicyResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+
+  rpc GetNodeCounters(GetNodeCountersRequest) returns (GetNodeCountersResponse);
+  rpc GetAggregateCounters(GetAggregateCountersRequest) returns (GetAggregateCountersResponse);
+}
+
+// ============================================================================
+// Common types
+// ============================================================================
+
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  NODE_STATE_REGISTERED = 1;
+  NODE_STATE_ONLINE = 2;
+  NODE_STATE_DEPLOYING = 3;
+  NODE_STATE_ACTIVE = 4;
+  NODE_STATE_ERROR = 5;
+  NODE_STATE_OFFLINE = 6;
+}
+
+message NodeInfo {
+  string node_id = 1;
+  string hostname = 2;
+  string agent_address = 3;         // e.g. "192.168.1.10:50055"
+  map<string, string> labels = 4;
+  NodeState state = 5;
+  google.protobuf.Timestamp registered_at = 6;
+  google.protobuf.Timestamp last_heartbeat = 7;
+  string pacgate_version = 8;
+}
+
+message RuleCounter {
+  string rule_name = 1;
+  uint64 match_count = 2;
+  uint64 byte_count = 3;
+}
+
+message CompileOptions {
+  bool counters = 1;
+  bool rate_limit = 2;
+  bool conntrack = 3;
+}
+
+// ============================================================================
+// PaciNetController messages
+// ============================================================================
+
+message RegisterNodeRequest {
+  string hostname = 1;
+  string agent_address = 2;
+  map<string, string> labels = 3;
+  string pacgate_version = 4;
+}
+
+message RegisterNodeResponse {
+  string node_id = 1;
+  bool accepted = 2;
+  string message = 3;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  NodeState state = 2;
+  double cpu_usage = 3;
+  uint64 uptime_seconds = 4;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+}
+
+message ReportCountersRequest {
+  string node_id = 1;
+  repeated RuleCounter counters = 2;
+  google.protobuf.Timestamp collected_at = 3;
+}
+
+message ReportCountersResponse {
+  bool acknowledged = 1;
+}
+
+// ============================================================================
+// PaciNetAgent messages
+// ============================================================================
+
+message DeployRulesRequest {
+  string rules_yaml = 1;
+  CompileOptions options = 2;
+}
+
+message DeployRulesResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string warnings = 3;
+}
+
+message GetCountersRequest {}
+
+message GetCountersResponse {
+  repeated RuleCounter counters = 1;
+  google.protobuf.Timestamp collected_at = 2;
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  NodeState state = 1;
+  string pacgate_version = 2;
+  string active_policy_hash = 3;
+  uint64 uptime_seconds = 4;
+}
+
+// ============================================================================
+// PaciNetManagement messages
+// ============================================================================
+
+message ListNodesRequest {
+  map<string, string> label_filter = 1;
+}
+
+message ListNodesResponse {
+  repeated NodeInfo nodes = 1;
+}
+
+message GetNodeRequest {
+  string node_id = 1;
+}
+
+message GetNodeResponse {
+  NodeInfo node = 1;
+}
+
+message RemoveNodeRequest {
+  string node_id = 1;
+}
+
+message RemoveNodeResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message DeployPolicyRequest {
+  string node_id = 1;
+  string rules_yaml = 2;
+  CompileOptions options = 3;
+}
+
+message DeployPolicyResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string warnings = 3;
+}
+
+message GetPolicyRequest {
+  string node_id = 1;
+}
+
+message GetPolicyResponse {
+  string node_id = 1;
+  string rules_yaml = 2;
+  string policy_hash = 3;
+  google.protobuf.Timestamp deployed_at = 4;
+}
+
+message GetNodeCountersRequest {
+  string node_id = 1;
+}
+
+message GetNodeCountersResponse {
+  string node_id = 1;
+  repeated RuleCounter counters = 2;
+  google.protobuf.Timestamp collected_at = 3;
+}
+
+message GetAggregateCountersRequest {
+  map<string, string> label_filter = 1;
+}
+
+message GetAggregateCountersResponse {
+  repeated NodeCounterSet node_counters = 1;
+}
+
+message NodeCounterSet {
+  string node_id = 1;
+  repeated RuleCounter counters = 2;
+  google.protobuf.Timestamp collected_at = 3;
+}

@@ -1,0 +1,22 @@
+[package]
+name = "pacinet-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "pacinet"
+path = "src/main.rs"
+
+[dependencies]
+pacinet-proto = { workspace = true }
+pacinet-core = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true }
+prost-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
