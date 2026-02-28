@@ -22,3 +22,6 @@ certs/
 *.db
 *.db-wal
 *.db-shm
+
+# Node.js
+node_modules/
