@@ -175,34 +175,78 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
         let req = request.into_inner();
 
         // Verify node exists
-        let _node = self
+        let node = self
             .registry
             .get_node(&req.node_id)
             .ok_or_else(|| Status::not_found(format!("Node {} not found", req.node_id)))?;
 
-        // TODO: Forward deploy request to agent via gRPC client
-        // For now, just store the policy
         let policy_hash = format!("{:x}", md5_hash(&req.rules_yaml));
         let options = req.options.unwrap_or_default();
 
+        // Store policy locally
         let policy = pacinet_core::model::Policy {
             node_id: req.node_id.clone(),
-            rules_yaml: req.rules_yaml,
+            rules_yaml: req.rules_yaml.clone(),
             policy_hash,
             deployed_at: chrono::Utc::now(),
             counters_enabled: options.counters,
             rate_limit_enabled: options.rate_limit,
             conntrack_enabled: options.conntrack,
         };
-
         self.registry.store_policy(policy);
-        info!(node_id = %req.node_id, "Policy stored (agent deployment pending)");
 
-        Ok(Response::new(DeployPolicyResponse {
-            success: true,
-            message: "Policy stored; agent deployment not yet implemented".to_string(),
-            warnings: vec![],
-        }))
+        // Set node to Deploying state
+        self.registry
+            .update_node_state(&req.node_id, pacinet_core::NodeState::Deploying);
+
+        // Forward deploy request to agent via gRPC
+        let agent_addr = format!("http://{}", node.agent_address);
+        info!(node_id = %req.node_id, agent = %agent_addr, "Forwarding deploy to agent");
+
+        let agent_result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            Self::forward_deploy_to_agent(&agent_addr, &req.rules_yaml, req.options),
+        )
+        .await;
+
+        match agent_result {
+            Ok(Ok(response)) => {
+                if response.success {
+                    self.registry
+                        .update_node_state(&req.node_id, pacinet_core::NodeState::Active);
+                    info!(node_id = %req.node_id, "Policy deployed successfully to agent");
+                } else {
+                    self.registry
+                        .update_node_state(&req.node_id, pacinet_core::NodeState::Error);
+                    warn!(node_id = %req.node_id, msg = %response.message, "Agent deploy failed");
+                }
+                Ok(Response::new(DeployPolicyResponse {
+                    success: response.success,
+                    message: response.message,
+                    warnings: response.warnings,
+                }))
+            }
+            Ok(Err(e)) => {
+                self.registry
+                    .update_node_state(&req.node_id, pacinet_core::NodeState::Error);
+                warn!(node_id = %req.node_id, error = %e, "Failed to connect to agent");
+                Ok(Response::new(DeployPolicyResponse {
+                    success: false,
+                    message: format!("Failed to reach agent: {}", e),
+                    warnings: vec!["Policy stored locally but agent unreachable".to_string()],
+                }))
+            }
+            Err(_) => {
+                self.registry
+                    .update_node_state(&req.node_id, pacinet_core::NodeState::Error);
+                warn!(node_id = %req.node_id, "Agent deploy timed out after 30s");
+                Ok(Response::new(DeployPolicyResponse {
+                    success: false,
+                    message: "Agent communication timed out (30s)".to_string(),
+                    warnings: vec!["Policy stored locally but agent timed out".to_string()],
+                }))
+            }
+        }
     }
 
     async fn get_policy(
@@ -271,6 +315,26 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
         Ok(Response::new(GetAggregateCountersResponse {
             node_counters,
         }))
+    }
+}
+
+impl ManagementService {
+    async fn forward_deploy_to_agent(
+        agent_addr: &str,
+        rules_yaml: &str,
+        options: Option<CompileOptions>,
+    ) -> Result<DeployRulesResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let mut client =
+            paci_net_agent_client::PaciNetAgentClient::connect(agent_addr.to_string()).await?;
+
+        let response = client
+            .deploy_rules(DeployRulesRequest {
+                rules_yaml: rules_yaml.to_string(),
+                options,
+            })
+            .await?;
+
+        Ok(response.into_inner())
     }
 }
 

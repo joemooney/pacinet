@@ -84,7 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent_state = Arc::new(RwLock::new(service::AgentState {
         node_id: node_id.clone(),
         controller_address: args.controller.clone(),
-        pacgate_runner: pacgate::PacGateRunner::new(),
+        pacgate: pacgate::PacGateBackend::Real(pacgate::PacGateRunner::new()),
+        active_policy_hash: None,
+        active_rules_yaml: None,
+        deployed_at: None,
+        start_time: tokio::time::Instant::now(),
+        counters: vec![],
     }));
 
     // Start agent gRPC server
@@ -96,8 +101,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn heartbeat task
     let hb_controller = args.controller.clone();
     let hb_node_id = node_id.clone();
+    let hb_state = agent_state.clone();
     tokio::spawn(async move {
-        heartbeat_loop(&hb_controller, &hb_node_id).await;
+        heartbeat_loop(&hb_controller, &hb_node_id, hb_state).await;
     });
 
     tonic::transport::Server::builder()
@@ -139,11 +145,26 @@ async fn register_with_controller(
     Ok(resp.node_id)
 }
 
-async fn heartbeat_loop(controller_addr: &str, node_id: &str) {
+async fn heartbeat_loop(
+    controller_addr: &str,
+    node_id: &str,
+    state: Arc<RwLock<service::AgentState>>,
+) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
 
     loop {
         interval.tick().await;
+
+        let (uptime, node_state) = {
+            let s = state.read().await;
+            let uptime = s.start_time.elapsed().as_secs();
+            let ns = if s.active_policy_hash.is_some() {
+                pacinet_proto::NodeState::Active
+            } else {
+                pacinet_proto::NodeState::Online
+            };
+            (uptime, ns)
+        };
 
         match pacinet_proto::paci_net_controller_client::PaciNetControllerClient::connect(
             controller_addr.to_string(),
@@ -154,9 +175,9 @@ async fn heartbeat_loop(controller_addr: &str, node_id: &str) {
                 let result = client
                     .heartbeat(pacinet_proto::HeartbeatRequest {
                         node_id: node_id.to_string(),
-                        state: pacinet_proto::NodeState::Online as i32,
+                        state: node_state as i32,
                         cpu_usage: 0.0,
-                        uptime_seconds: 0,
+                        uptime_seconds: uptime,
                     })
                     .await;
 

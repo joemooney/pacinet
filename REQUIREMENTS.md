@@ -101,3 +101,18 @@
 ### 7.3 Error Handling
 - Domain errors (PaciNetError) map to gRPC Status codes
 - Graceful handling of agent disconnections
+
+### 7.4 Testing
+- Unit tests for PacGate JSON parsing and mock backend
+- Unit tests for NodeRegistry (register, remove, filter, state update)
+- Integration tests using ephemeral ports (no port conflicts):
+  - Full happy path: register → deploy → counters → query
+  - Deploy to unreachable agent: graceful failure, node state = Error
+  - Deploy with PacGate failure: returns failure, node state = Error
+- PacGateBackend enum (Real | Mock) for test isolation
+
+### 7.5 Deploy Forwarding
+- Controller forwards DeployPolicy to agent via PaciNetAgent gRPC client
+- 30-second timeout for agent communication
+- Node state transitions: Deploying → Active (success) or Error (failure)
+- Policy stored locally regardless of agent reachability

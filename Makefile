@@ -1,4 +1,4 @@
-.PHONY: build check test clean fmt clippy run-server run-agent
+.PHONY: build check test clean fmt clippy run-server run-agent integration-test test-all
 
 build:
 	cargo build
@@ -29,3 +29,10 @@ node-list:
 
 status:
 	cargo run -p pacinet-cli -- --server http://127.0.0.1:50054 status
+
+integration-test:
+	cargo test --test integration -p pacinet-server
+
+test-all:
+	cargo test --workspace
+	cargo clippy --workspace -- -D warnings

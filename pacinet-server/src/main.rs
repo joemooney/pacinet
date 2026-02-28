@@ -2,8 +2,8 @@
 //!
 //! Manages node registration, policy deployment, and counter aggregation.
 
-mod registry;
-mod service;
+use pacinet_server::registry;
+use pacinet_server::service;
 
 use clap::Parser;
 use std::net::SocketAddr;

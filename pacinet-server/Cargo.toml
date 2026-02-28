@@ -3,6 +3,10 @@ name = "pacinet-server"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "pacinet_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pacinet-server"
 path = "src/main.rs"
@@ -23,3 +27,7 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+pacinet-agent = { path = "../pacinet-agent" }
+tokio-stream = { workspace = true }

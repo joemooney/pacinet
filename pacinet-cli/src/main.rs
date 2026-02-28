@@ -198,8 +198,8 @@ async fn handle_node(action: NodeCommands, server: &str, as_json: bool) -> Resul
                 println!("No nodes registered");
             } else {
                 println!(
-                    "{:<38} {:<20} {:<25} {}",
-                    "NODE ID", "HOSTNAME", "ADDRESS", "STATE"
+                    "{:<38} {:<20} {:<25} STATE",
+                    "NODE ID", "HOSTNAME", "ADDRESS"
                 );
                 for node in &response.nodes {
                     println!(

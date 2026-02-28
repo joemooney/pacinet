@@ -72,4 +72,4 @@ YAML is the interface contract between the two systems.
 
 ## Current Status
 
-Phase 1 scaffold complete — all crates compile, basic gRPC services implemented, CLI functional. Ready for Phase 2 (end-to-end integration testing, real PacGate invocation, persistent storage).
+**Phase 2 complete** — full end-to-end deployment flow works: CLI → Controller → Agent → PacGate. Controller forwards deploy requests to agents via gRPC with 30s timeout and graceful failure handling. Agent tracks deployment state, reports real uptime and status. PacGateBackend abstraction enables mock testing. Integration test suite validates happy path, unreachable agent, and PacGate failure scenarios. 14 tests (5 pacgate unit, 4 registry unit, 2 core, 3 integration) all passing.

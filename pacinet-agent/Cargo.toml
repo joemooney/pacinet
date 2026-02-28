@@ -3,6 +3,10 @@ name = "pacinet-agent"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "pacinet_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pacinet-agent"
 path = "src/main.rs"
