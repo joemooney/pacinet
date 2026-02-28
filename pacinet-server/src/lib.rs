@@ -2,6 +2,7 @@ pub mod config;
 pub mod counter_cache;
 pub mod counter_rate;
 pub mod deploy;
+pub mod events;
 pub mod fsm_engine;
 pub mod metrics;
 pub mod service;

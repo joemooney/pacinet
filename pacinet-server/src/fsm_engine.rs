@@ -4,6 +4,7 @@ use crate::config::ControllerConfig;
 use crate::counter_cache::CounterSnapshotCache;
 use crate::counter_rate::{self, AggregateMode};
 use crate::deploy;
+use crate::events::{EventBus, FsmEvent as DomainFsmEvent};
 use crate::metrics as m;
 use crate::storage::blocking;
 use crate::webhook;
@@ -19,6 +20,7 @@ pub struct FsmEngine {
     config: ControllerConfig,
     tls_config: Option<pacinet_core::tls::TlsConfig>,
     counter_cache: Arc<CounterSnapshotCache>,
+    event_bus: Option<EventBus>,
 }
 
 impl FsmEngine {
@@ -33,7 +35,13 @@ impl FsmEngine {
             config,
             tls_config,
             counter_cache,
+            event_bus: None,
         }
+    }
+
+    pub fn with_event_bus(mut self, event_bus: EventBus) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     /// Background loop: evaluate all Running instances every 5s.
@@ -320,6 +328,8 @@ impl FsmEngine {
             return Err(pacinet_core::PaciNetError::Fsm(FsmError::AlreadyCompleted));
         }
 
+        let def_name = instance.definition_name.clone();
+        let inst_id = instance.instance_id.clone();
         instance.status = FsmInstanceStatus::Cancelled;
         instance.updated_at = chrono::Utc::now();
         instance.history.push(FsmTransitionRecord {
@@ -333,6 +343,16 @@ impl FsmEngine {
         blocking(&self.storage, move |s| s.update_fsm_instance(instance))
             .await
             .map_err(|e| pacinet_core::PaciNetError::Internal(e.to_string()))?;
+
+        // Emit instance completed event (cancelled)
+        if let Some(ref bus) = self.event_bus {
+            bus.emit_fsm(DomainFsmEvent::InstanceCompleted {
+                instance_id: inst_id.clone(),
+                definition_name: def_name,
+                final_status: "cancelled".to_string(),
+                timestamp: chrono::Utc::now(),
+            });
+        }
 
         m::record_fsm_instance_status("cancelled");
         info!(instance_id = %instance_id, "FSM instance cancelled");
@@ -688,7 +708,22 @@ impl FsmEngine {
             .counter_condition_first_true
             .retain(|k, _| !k.starts_with(&format!("{}:", old_state)));
 
-        instance.transition(to_state.to_string(), trigger, message);
+        let from_state_for_event = instance.current_state.clone();
+        let trigger_str = trigger.to_string();
+        instance.transition(to_state.to_string(), trigger, message.clone());
+
+        // Emit transition event
+        if let Some(ref bus) = self.event_bus {
+            bus.emit_fsm(DomainFsmEvent::Transition {
+                instance_id: instance.instance_id.clone(),
+                definition_name: instance.definition_name.clone(),
+                from_state: from_state_for_event,
+                to_state: to_state.to_string(),
+                trigger: trigger_str,
+                message,
+                timestamp: chrono::Utc::now(),
+            });
+        }
 
         // Execute target state's action if any
         if let Some(state_def) = definition.states.get(to_state) {
@@ -700,6 +735,16 @@ impl FsmEngine {
             if state_def.terminal {
                 instance.status = FsmInstanceStatus::Completed;
                 m::record_fsm_instance_status("completed");
+
+                // Emit instance completed event
+                if let Some(ref bus) = self.event_bus {
+                    bus.emit_fsm(DomainFsmEvent::InstanceCompleted {
+                        instance_id: instance.instance_id.clone(),
+                        definition_name: instance.definition_name.clone(),
+                        final_status: "completed".to_string(),
+                        timestamp: chrono::Utc::now(),
+                    });
+                }
             }
         }
     }
@@ -823,6 +868,18 @@ impl FsmEngine {
             }
         }
         instance.context.last_action_result = Some(result);
+
+        // Emit deploy progress event
+        if let Some(ref bus) = self.event_bus {
+            bus.emit_fsm(DomainFsmEvent::DeployProgress {
+                instance_id: instance.instance_id.clone(),
+                definition_name: instance.definition_name.clone(),
+                deployed_nodes: instance.context.deployed_nodes.len() as u32,
+                failed_nodes: instance.context.failed_nodes.len() as u32,
+                target_nodes: instance.context.target_nodes.len() as u32,
+                timestamp: chrono::Utc::now(),
+            });
+        }
     }
 
     async fn execute_rollback(

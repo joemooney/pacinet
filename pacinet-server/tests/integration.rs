@@ -11,12 +11,14 @@ use pacinet_core::Storage;
 use pacinet_proto::*;
 use pacinet_server::config::ControllerConfig;
 use pacinet_server::counter_cache::CounterSnapshotCache;
+use pacinet_server::events::EventBus;
 use pacinet_server::fsm_engine::FsmEngine;
 use pacinet_server::service::{ControllerService, ManagementService};
 use pacinet_server::storage::MemoryStorage;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::StreamExt;
 
 /// Start the controller (PaciNetController + PaciNetManagement) on an ephemeral port.
 /// Returns the port it's listening on.
@@ -1412,4 +1414,375 @@ async fn test_counter_condition_for_duration() {
         info.status, info.current_state
     );
     assert_eq!(info.current_state, "escalated");
+}
+
+// ============================================================================
+// Phase 6: Streaming integration tests
+// ============================================================================
+
+/// Start the controller with event bus enabled. Returns (port, EventBus).
+async fn start_controller_with_events(storage: Arc<dyn Storage>) -> (u16, EventBus) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let event_bus = EventBus::new(256);
+
+    let counter_cache = Arc::new(CounterSnapshotCache::new(chrono::Duration::hours(1), 120));
+
+    let controller_service = ControllerService::new(storage.clone())
+        .with_counter_cache(counter_cache.clone())
+        .with_event_bus(event_bus.clone());
+    let config = ControllerConfig::default();
+    let fsm_engine = Arc::new(
+        FsmEngine::new(storage.clone(), config.clone(), None, counter_cache.clone())
+            .with_event_bus(event_bus.clone()),
+    );
+
+    // Spawn FSM engine eval loop
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let engine_clone = fsm_engine.clone();
+    tokio::spawn(async move {
+        engine_clone.run(shutdown_rx).await;
+    });
+
+    let management_service = ManagementService::new(storage.clone(), config)
+        .with_fsm_engine(fsm_engine)
+        .with_event_bus(event_bus.clone());
+
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(paci_net_controller_server::PaciNetControllerServer::new(
+                controller_service,
+            ))
+            .add_service(paci_net_management_server::PaciNetManagementServer::new(
+                management_service,
+            ))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+        drop(shutdown_tx);
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    (port, event_bus)
+}
+
+/// Test that WatchNodeEvents streams a Registered event when a node is registered.
+#[tokio::test]
+async fn test_watch_node_events_registration() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let (ctrl_port, _event_bus) = start_controller_with_events(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    // Subscribe to node events
+    let mut mgmt =
+        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+    let mut stream = mgmt
+        .watch_node_events(WatchNodeEventsRequest {
+            label_filter: HashMap::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Give the stream a moment to establish
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Register a node
+    let _node_id = register_node(
+        &ctrl_addr,
+        "stream-test-1",
+        "127.0.0.1:55555",
+        HashMap::from([("env".to_string(), "test".to_string())]),
+    )
+    .await;
+
+    // Should receive a Registered event
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("Timeout waiting for node event")
+        .expect("Stream ended unexpectedly")
+        .expect("Error in stream");
+
+    assert_eq!(
+        event.event_type,
+        NodeEventType::NodeEventRegistered as i32
+    );
+    assert_eq!(event.hostname, "stream-test-1");
+    assert!(!event.node_id.is_empty());
+}
+
+/// Test that WatchCounters streams counter updates with rate data.
+#[tokio::test]
+async fn test_watch_counters_report() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let (ctrl_port, _event_bus) = start_controller_with_events(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    // Register a node
+    let node_id = register_node(
+        &ctrl_addr,
+        "counter-stream-1",
+        "127.0.0.1:55556",
+        HashMap::new(),
+    )
+    .await;
+
+    // Subscribe to counters filtered by this node
+    let mut mgmt =
+        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+    let mut stream = mgmt
+        .watch_counters(WatchCountersRequest {
+            node_id: node_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Report counters
+    let mut ctrl_client =
+        paci_net_controller_client::PaciNetControllerClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+
+    ctrl_client
+        .report_counters(ReportCountersRequest {
+            node_id: node_id.clone(),
+            counters: vec![RuleCounter {
+                rule_name: "drop_all".to_string(),
+                match_count: 1000,
+                byte_count: 50000,
+            }],
+            collected_at: Some(prost_types::Timestamp {
+                seconds: chrono::Utc::now().timestamp(),
+                nanos: 0,
+            }),
+        })
+        .await
+        .unwrap();
+
+    // Should receive counter update
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("Timeout waiting for counter event")
+        .expect("Stream ended unexpectedly")
+        .expect("Error in stream");
+
+    assert_eq!(event.node_id, node_id);
+    assert_eq!(event.counters.len(), 1);
+    assert_eq!(event.counters[0].rule_name, "drop_all");
+    assert_eq!(event.counters[0].match_count, 1000);
+    assert_eq!(event.counters[0].byte_count, 50000);
+}
+
+/// Test that WatchCounters with a node filter only delivers matching events.
+#[tokio::test]
+async fn test_watch_counters_filter() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let (ctrl_port, _event_bus) = start_controller_with_events(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    // Register two nodes
+    let node_a = register_node(
+        &ctrl_addr,
+        "filter-node-a",
+        "127.0.0.1:55560",
+        HashMap::new(),
+    )
+    .await;
+    let node_b = register_node(
+        &ctrl_addr,
+        "filter-node-b",
+        "127.0.0.1:55561",
+        HashMap::new(),
+    )
+    .await;
+
+    // Subscribe to counters for node_a only
+    let mut mgmt =
+        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+    let mut stream = mgmt
+        .watch_counters(WatchCountersRequest {
+            node_id: node_a.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let mut ctrl_client =
+        paci_net_controller_client::PaciNetControllerClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+
+    // Report counters for node_b (should be filtered out)
+    ctrl_client
+        .report_counters(ReportCountersRequest {
+            node_id: node_b.clone(),
+            counters: vec![RuleCounter {
+                rule_name: "rule_b".to_string(),
+                match_count: 999,
+                byte_count: 999,
+            }],
+            collected_at: Some(prost_types::Timestamp {
+                seconds: chrono::Utc::now().timestamp(),
+                nanos: 0,
+            }),
+        })
+        .await
+        .unwrap();
+
+    // Report counters for node_a (should arrive)
+    ctrl_client
+        .report_counters(ReportCountersRequest {
+            node_id: node_a.clone(),
+            counters: vec![RuleCounter {
+                rule_name: "rule_a".to_string(),
+                match_count: 42,
+                byte_count: 4200,
+            }],
+            collected_at: Some(prost_types::Timestamp {
+                seconds: chrono::Utc::now().timestamp(),
+                nanos: 0,
+            }),
+        })
+        .await
+        .unwrap();
+
+    // Only node_a event should arrive
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("Timeout waiting for counter event")
+        .expect("Stream ended unexpectedly")
+        .expect("Error in stream");
+
+    assert_eq!(event.node_id, node_a);
+    assert_eq!(event.counters[0].rule_name, "rule_a");
+    assert_eq!(event.counters[0].match_count, 42);
+}
+
+/// Test that WatchFsmEvents streams transition events.
+#[tokio::test]
+async fn test_watch_fsm_transition() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let (ctrl_port, _event_bus) = start_controller_with_events(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    // Register a node and create FSM definition with manual advance
+    let (agent_port, _agent_state) = start_agent(PacGateBackend::Mock {
+        should_succeed: true,
+    })
+    .await;
+    let agent_address = format!("127.0.0.1:{}", agent_port);
+
+    let node_id = register_node(
+        &ctrl_addr,
+        "fsm-stream-1",
+        &agent_address,
+        HashMap::from([("env".to_string(), "test".to_string())]),
+    )
+    .await;
+
+    // Transition node to Online so deploys can work
+    storage
+        .update_node_state(&node_id, pacinet_core::NodeState::Online)
+        .unwrap();
+
+    let mut mgmt =
+        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+
+    // Create a simple FSM: start -> deployed (manual) -> done (terminal)
+    let def_yaml = r#"
+name: stream-test-deploy
+kind: deployment
+description: Test FSM for streaming
+initial: start
+states:
+  start:
+    transitions:
+      - to: deployed
+        when:
+          manual: true
+  deployed:
+    terminal: true
+"#;
+
+    mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
+        definition_yaml: def_yaml.to_string(),
+    })
+    .await
+    .unwrap();
+
+    // Start FSM instance
+    let start_resp = mgmt
+        .start_fsm(StartFsmRequest {
+            definition_name: "stream-test-deploy".to_string(),
+            rules_yaml: "rules:\n  - name: test\n    action: pass".to_string(),
+            options: None,
+            target_label_filter: HashMap::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(start_resp.success);
+    let instance_id = start_resp.instance_id;
+
+    // Subscribe to FSM events for this instance
+    let mut stream = mgmt
+        .watch_fsm_events(WatchFsmEventsRequest {
+            instance_id: instance_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Advance FSM
+    mgmt.advance_fsm(AdvanceFsmRequest {
+        instance_id: instance_id.clone(),
+        target_state: "deployed".to_string(),
+    })
+    .await
+    .unwrap();
+
+    // Should receive transition event
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("Timeout waiting for FSM event")
+        .expect("Stream ended unexpectedly")
+        .expect("Error in stream");
+
+    assert_eq!(
+        event.event_type,
+        FsmEventType::FsmEventTransition as i32
+    );
+    assert_eq!(event.instance_id, instance_id);
+    assert_eq!(event.from_state, "start");
+    assert_eq!(event.to_state, "deployed");
+
+    // Should also receive instance completed event (terminal state)
+    let event2 = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("Timeout waiting for FSM completed event")
+        .expect("Stream ended unexpectedly")
+        .expect("Error in stream");
+
+    assert_eq!(
+        event2.event_type,
+        FsmEventType::FsmEventInstanceCompleted as i32
+    );
+    assert_eq!(event2.instance_id, instance_id);
+    assert_eq!(event2.final_status, "completed");
 }

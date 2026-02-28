@@ -123,42 +123,77 @@
 - Fire-and-forget via `tokio::spawn` — does not block FSM evaluation
 - Metrics recorded for webhook delivery success/failure
 
-## 4. Counter Collection
+## 4. Server-Side Streaming
 
-### 4.1 Node Counters
+### 4.1 EventBus
+- Wraps three `tokio::sync::broadcast` channels: FSM events, counter events, node events
+- Created once in main.rs, cloned into services via `with_event_bus()` builder
+- `Option<EventBus>` pattern for backward compatibility (existing tests without event bus still work)
+- Buffer size: 256 per channel (hardcoded)
+- Events are ephemeral — no persistent event log or replay
+
+### 4.2 WatchFsmEvents (stream)
+- Streams FSM transitions, deploy progress, and instance completions
+- Optional `instance_id` filter — when set, only events for that instance are streamed
+- Event types: Transition (from→to state, trigger, message), DeployProgress (deployed/failed/target counts), InstanceCompleted (final status)
+- Emitted from FsmEngine on state transitions, deploy actions, cancellations
+
+### 4.3 WatchCounters (stream)
+- Streams counter updates with calculated rates (matches/s, bytes/s) per rule
+- Optional `node_id` filter — when set, only events for that node are streamed
+- Emitted from ControllerService on each `ReportCounters` RPC, with rates calculated from latest snapshot pair
+
+### 4.4 WatchNodeEvents (stream)
+- Streams node lifecycle events: Registered, StateChanged, HeartbeatStale, Removed
+- Optional `label_filter` — when set, only events for nodes matching all labels are streamed
+- Emitted from ControllerService (register, heartbeat state changes, remove) and stale node reaper (heartbeat stale)
+
+### 4.5 Event Emission Points
+- `register_node()` → NodeEvent::Registered
+- `heartbeat()` → NodeEvent::StateChanged (when state changes)
+- `report_counters()` → CounterEvent (with calculated rates)
+- `remove_node()` → NodeEvent::Removed
+- `fire_transition()` → FsmEvent::Transition, FsmEvent::InstanceCompleted (terminal)
+- `execute_deploy()` → FsmEvent::DeployProgress
+- `cancel_instance()` → FsmEvent::InstanceCompleted (cancelled)
+- Stale reaper → NodeEvent::HeartbeatStale
+
+## 5. Counter Collection
+
+### 5.1 Node Counters
 - Agents report rule match counters to controller
 - Counters include: rule name, match count, byte count
 
-### 4.2 Aggregate Counters
+### 5.2 Aggregate Counters
 - CLI can query counters for individual nodes or aggregate across nodes
 - Aggregation supports label-based filtering
 
-## 5. CLI Interface
+## 6. CLI Interface
 
-### 5.1 Node Commands
+### 6.1 Node Commands
 - `pacinet node list [--label key=val]` — shows policy hash and heartbeat age columns
 - `pacinet node show <node-id>` — shows enriched node details
 - `pacinet node remove <node-id>`
 
-### 5.2 Deployment Commands
+### 6.2 Deployment Commands
 - `pacinet deploy <rules.yaml> --node <node-id> [--counters] [--rate-limit] [--conntrack]` — single-node deploy
 - `pacinet deploy <rules.yaml> --label key=val [--counters]` — batch deploy with per-node result table and summary
 - `pacinet deploy history <node-id> [--limit N]` — deployment audit trail
 
-### 5.3 Policy Commands
+### 6.3 Policy Commands
 - `pacinet policy show <node-id>`
 - `pacinet policy diff <node-a> <node-b>` — unified diff between two node policies
 - `pacinet policy history <node-id> [--limit N]` — policy version history
 - `pacinet policy rollback <node-id> [--version N]` — rollback to previous or specific version
 
-### 5.4 Counter Commands
+### 6.4 Counter Commands
 - `pacinet counters <node-id> [--json]`
 - `pacinet counters --aggregate [--label key=val]`
 
-### 5.5 Status Commands
+### 6.5 Status Commands
 - `pacinet status [--label key=val]` — fleet status with node counts by state and enriched node table
 
-### 5.6 FSM Commands
+### 6.6 FSM Commands
 - `pacinet fsm create <file.yaml>` — create FSM definition from YAML file
 - `pacinet fsm list [--kind deployment]` — list definitions
 - `pacinet fsm show <name>` — show definition YAML
@@ -169,61 +204,69 @@
 - `pacinet fsm advance <instance-id> [--state X]` — manually advance instance
 - `pacinet fsm cancel <instance-id>` — cancel running instance
 
-### 5.7 Output Formats
+### 6.7 Watch Commands
+- `pacinet watch fsm [--instance <id>]` — stream FSM transitions, deploy progress, completions
+- `pacinet watch counters [--node <id>]` — stream counter updates with rates
+- `pacinet watch nodes [--label key=val]` — stream node lifecycle events
+- Human-readable output with timestamps (default)
+- JSON output via `--json` flag
+- Ctrl+C terminates the stream
+
+### 6.8 Output Formats
 - Human-readable table output (default)
 - JSON output via `--json` flag
 
-## 6. Communication
+## 7. Communication
 
-### 6.1 gRPC Services
+### 7.1 gRPC Services
 - PaciNetController (agent → controller): RegisterNode, Heartbeat, ReportCounters
 - PaciNetAgent (controller → agent): DeployRules, GetCounters, GetStatus
-- PaciNetManagement (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy, CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm
+- PaciNetManagement (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy, CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm, WatchFsmEvents (stream), WatchCounters (stream), WatchNodeEvents (stream)
 
-### 6.2 Port Assignments
+### 7.2 Port Assignments
 - Controller: 50054 (configurable)
 - Agent: 50055 (configurable per node)
 - Prometheus metrics: 9090 (configurable, 0 to disable)
 
-### 6.3 Health Checks
+### 7.3 Health Checks
 - gRPC health service via tonic-health
 
-### 6.4 gRPC-Web
+### 7.4 gRPC-Web
 - HTTP/1 support via tonic-web for browser-based clients
 
-## 7. Security
+## 8. Security
 
-### 7.1 Mutual TLS (mTLS)
+### 8.1 Mutual TLS (mTLS)
 - Optional mTLS on all gRPC channels
 - Three flags: `--ca-cert`, `--tls-cert`, `--tls-key` (all required together, or all omitted)
 - Channels secured: agent→controller, controller→agent, CLI→controller
 - When TLS absent: plain HTTP for development convenience
 - Certificate generation script for development (`scripts/gen-certs.sh`)
 
-### 7.2 Certificate Management
+### 8.2 Certificate Management
 - CA certificate, server cert, agent cert, client cert — all signed by the same CA
 - Development script uses openssl for self-signed certificates
 - Production: external CA/PKI expected
 
-## 8. PacGate Integration
+## 9. PacGate Integration
 
-### 8.1 Subprocess Invocation
+### 9.1 Subprocess Invocation
 - Agent invokes `pacgate` binary as subprocess
 - YAML rules written to temp file, cleaned up after compilation
 - JSON output parsed for success/warnings/errors
 
-### 8.2 Version Detection
+### 9.2 Version Detection
 - Agent auto-detects PacGate version at startup via `pacgate --version`
 - Override via `--pacgate-version` CLI flag
 - Version reported to controller during registration
 
-### 8.3 Decoupling
+### 9.3 Decoupling
 - PaciNet has no compile-time dependency on PacGate
 - YAML is the sole interface contract
 
-## 9. Observability
+## 10. Observability
 
-### 9.1 Prometheus Metrics
+### 10.1 Prometheus Metrics
 - HTTP endpoint on configurable port (default 9090, 0 to disable)
 - Metrics exposed:
   - `pacinet_nodes_total` (gauge) — total registered nodes
@@ -243,21 +286,21 @@
   - `pacinet_webhook_deliveries_total{result}` (counter) — webhook delivery attempts
   - `pacinet_counter_evals_total{result}` (counter) — counter condition evaluations
 
-### 9.2 Structured Logging
+### 10.2 Structured Logging
 - via tracing with EnvFilter
 - `#[tracing::instrument]` on gRPC handlers
 - Debug level for heartbeat to reduce noise
 - `RUST_LOG` environment variable for filtering
 
-## 10. Non-Functional Requirements
+## 11. Non-Functional Requirements
 
-### 10.1 Storage
+### 11.1 Storage
 - Storage trait (`Arc<dyn Storage>`) for backend abstraction
 - MemoryStorage: in-memory with RwLock (default for dev/test)
 - SqliteStorage: rusqlite with WAL mode, foreign keys, schema migrations (for production)
 - Controller selects backend via `--db <path>` flag (omit for in-memory)
 
-### 10.2 Configuration
+### 11.2 Configuration
 - `--deploy-timeout` (default 30s)
 - `--heartbeat-expect-interval` (default 30s)
 - `--heartbeat-miss-threshold` (default 3)
@@ -267,18 +310,18 @@
 - `--counter-max-per-node` (default 120) — max cached snapshots per node
 - `RUST_LOG` environment variable for log filtering
 
-### 10.3 Error Handling
+### 11.3 Error Handling
 - Domain errors (PaciNetError) map to gRPC Status codes
 - InvalidStateTransition → failed_precondition
 - ConcurrentDeploy → aborted
 - Graceful handling of agent disconnections
 
-### 10.4 Graceful Shutdown
+### 11.4 Graceful Shutdown
 - Server: SIGINT/SIGTERM → drain in-flight RPCs via serve_with_shutdown
 - Agent: SIGINT → stop heartbeat loop via watch channel, drain gRPC server
 - Clean log messages on shutdown
 
-### 10.5 Testing
+### 11.5 Testing
 - Unit tests for model types (state transitions, FromStr roundtrips)
 - Unit tests for MemoryStorage (9 tests: register, remove, filter, state transitions, invalid transition, concurrent deploy, policy versioning, deployment audit, stale detection)
 - Unit tests for SqliteStorage (9 tests mirroring MemoryStorage, using in-memory SQLite)
@@ -301,9 +344,13 @@
   - Counter rate calculation: rate from snapshots, counter reset handling
   - Counter condition fires transition: inject snapshots → rate_above threshold met → state transition
   - Counter condition for_duration: verify sustained threshold tracking
+  - Watch node events: subscribe, register node, verify Registered event
+  - Watch counters report: subscribe, report counters, verify CounterUpdate with rates
+  - Watch counters filter: two nodes, watch one, verify only filtered events
+  - Watch FSM transition: start FSM, advance, verify transition + completed events
 - PacGateBackend enum (Real | Mock) for test isolation
 
-### 10.6 CI/CD
+### 11.6 CI/CD
 - GitHub Actions pipeline on push and pull_request
 - Steps: cargo check, clippy (warnings as errors), test, fmt check
 - Rust stable toolchain with caching

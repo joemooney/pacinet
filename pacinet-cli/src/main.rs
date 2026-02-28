@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use pacinet_proto::paci_net_management_client::PaciNetManagementClient;
 use serde_json::json;
+use tokio_stream::StreamExt;
 use tracing::Level;
 
 /// PaciNet SDN Controller CLI
@@ -103,6 +104,11 @@ enum Commands {
     Fsm {
         #[command(subcommand)]
         action: FsmCommands,
+    },
+    /// Watch live events (streaming)
+    Watch {
+        #[command(subcommand)]
+        action: WatchCommands,
     },
     /// Show version
     Version,
@@ -230,6 +236,28 @@ enum FsmCommands {
     Cancel {
         /// Instance ID
         instance_id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum WatchCommands {
+    /// Watch FSM transition events
+    Fsm {
+        /// Filter by instance ID
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Watch counter updates with rates
+    Counters {
+        /// Filter by node ID
+        #[arg(long)]
+        node: Option<String>,
+    },
+    /// Watch node lifecycle events
+    Nodes {
+        /// Filter by label (key=value)
+        #[arg(short, long, value_parser = parse_label)]
+        label: Vec<(String, String)>,
     },
 }
 
@@ -362,6 +390,9 @@ async fn main() -> Result<()> {
         }
         Commands::Fsm { action } => {
             handle_fsm(action, &cli.server, cli.json, &tls_config).await?
+        }
+        Commands::Watch { action } => {
+            handle_watch(action, &cli.server, cli.json, &tls_config).await?
         }
         Commands::Version => {
             println!("pacinet {}", env!("CARGO_PKG_VERSION"));
@@ -1191,6 +1222,227 @@ async fn handle_fsm(
                 println!("FSM instance {} cancelled", instance_id);
             } else {
                 eprintln!("Failed: {}", response.message);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_watch(
+    action: WatchCommands,
+    server: &str,
+    as_json: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
+) -> Result<()> {
+    let mut client = connect(server, tls_config).await?;
+
+    match action {
+        WatchCommands::Fsm { instance } => {
+            let mut stream = client
+                .watch_fsm_events(pacinet_proto::WatchFsmEventsRequest {
+                    instance_id: instance.unwrap_or_default(),
+                })
+                .await?
+                .into_inner();
+
+            while let Some(event) = stream.next().await {
+                let event = event?;
+                if as_json {
+                    let val = json!({
+                        "event_type": event.event_type,
+                        "instance_id": event.instance_id,
+                        "definition_name": event.definition_name,
+                        "from_state": event.from_state,
+                        "to_state": event.to_state,
+                        "trigger": event.trigger,
+                        "message": event.message,
+                        "deployed_nodes": event.deployed_nodes,
+                        "failed_nodes": event.failed_nodes,
+                        "target_nodes": event.target_nodes,
+                        "final_status": event.final_status,
+                    });
+                    println!("{}", serde_json::to_string(&val)?);
+                } else {
+                    let time = event
+                        .timestamp
+                        .as_ref()
+                        .and_then(|t| {
+                            chrono::DateTime::from_timestamp(t.seconds, 0)
+                                .map(|dt| dt.format("%H:%M:%S").to_string())
+                        })
+                        .unwrap_or_else(|| "?".to_string());
+                    let id_short = if event.instance_id.len() > 8 {
+                        &event.instance_id[..8]
+                    } else {
+                        &event.instance_id
+                    };
+
+                    let event_type =
+                        pacinet_proto::FsmEventType::try_from(event.event_type).unwrap_or(
+                            pacinet_proto::FsmEventType::FsmEventUnspecified,
+                        );
+                    match event_type {
+                        pacinet_proto::FsmEventType::FsmEventTransition => {
+                            println!(
+                                "{} [{}] {} -> {} ({}) {}",
+                                time,
+                                id_short,
+                                event.from_state,
+                                event.to_state,
+                                event.trigger,
+                                event.message,
+                            );
+                        }
+                        pacinet_proto::FsmEventType::FsmEventDeployProgress => {
+                            println!(
+                                "{} [{}] deploy progress: {}/{} succeeded, {} failed",
+                                time,
+                                id_short,
+                                event.deployed_nodes,
+                                event.target_nodes,
+                                event.failed_nodes,
+                            );
+                        }
+                        pacinet_proto::FsmEventType::FsmEventInstanceCompleted => {
+                            println!(
+                                "{} [{}] instance completed: {}",
+                                time, id_short, event.final_status,
+                            );
+                        }
+                        _ => {
+                            println!("{} [{}] unknown event", time, id_short);
+                        }
+                    }
+                }
+            }
+        }
+        WatchCommands::Counters { node } => {
+            let mut stream = client
+                .watch_counters(pacinet_proto::WatchCountersRequest {
+                    node_id: node.unwrap_or_default(),
+                })
+                .await?
+                .into_inner();
+
+            while let Some(event) = stream.next().await {
+                let event = event?;
+                if as_json {
+                    let counters: Vec<_> = event
+                        .counters
+                        .iter()
+                        .map(|c| {
+                            json!({
+                                "rule_name": c.rule_name,
+                                "match_count": c.match_count,
+                                "byte_count": c.byte_count,
+                                "matches_per_second": c.matches_per_second,
+                                "bytes_per_second": c.bytes_per_second,
+                            })
+                        })
+                        .collect();
+                    let val = json!({
+                        "node_id": event.node_id,
+                        "counters": counters,
+                    });
+                    println!("{}", serde_json::to_string(&val)?);
+                } else {
+                    let time = event
+                        .collected_at
+                        .as_ref()
+                        .and_then(|t| {
+                            chrono::DateTime::from_timestamp(t.seconds, 0)
+                                .map(|dt| dt.format("%H:%M:%S").to_string())
+                        })
+                        .unwrap_or_else(|| "?".to_string());
+                    println!("{} node={}", time, event.node_id);
+                    for c in &event.counters {
+                        println!(
+                            "  {:<30} {:>8} matches ({:.1}/s)  {:>10} bytes ({:.1}/s)",
+                            c.rule_name,
+                            c.match_count,
+                            c.matches_per_second,
+                            c.byte_count,
+                            c.bytes_per_second,
+                        );
+                    }
+                }
+            }
+        }
+        WatchCommands::Nodes { label } => {
+            let label_filter: std::collections::HashMap<String, String> =
+                label.into_iter().collect();
+            let mut stream = client
+                .watch_node_events(pacinet_proto::WatchNodeEventsRequest { label_filter })
+                .await?
+                .into_inner();
+
+            while let Some(event) = stream.next().await {
+                let event = event?;
+                if as_json {
+                    let val = json!({
+                        "event_type": event.event_type,
+                        "node_id": event.node_id,
+                        "hostname": event.hostname,
+                        "labels": event.labels,
+                        "old_state": event.old_state,
+                        "new_state": event.new_state,
+                    });
+                    println!("{}", serde_json::to_string(&val)?);
+                } else {
+                    let time = event
+                        .timestamp
+                        .as_ref()
+                        .and_then(|t| {
+                            chrono::DateTime::from_timestamp(t.seconds, 0)
+                                .map(|dt| dt.format("%H:%M:%S").to_string())
+                        })
+                        .unwrap_or_else(|| "?".to_string());
+                    let id_short = if event.node_id.len() > 8 {
+                        &event.node_id[..8]
+                    } else {
+                        &event.node_id
+                    };
+
+                    let event_type =
+                        pacinet_proto::NodeEventType::try_from(event.event_type).unwrap_or(
+                            pacinet_proto::NodeEventType::NodeEventUnspecified,
+                        );
+                    match event_type {
+                        pacinet_proto::NodeEventType::NodeEventRegistered => {
+                            println!(
+                                "{} + {} ({}) registered",
+                                time, id_short, event.hostname,
+                            );
+                        }
+                        pacinet_proto::NodeEventType::NodeEventStateChanged => {
+                            let old = state_name(event.old_state);
+                            let new = state_name(event.new_state);
+                            println!(
+                                "{} ~ {} ({}) {} -> {}",
+                                time, id_short, event.hostname, old, new,
+                            );
+                        }
+                        pacinet_proto::NodeEventType::NodeEventHeartbeatStale => {
+                            println!(
+                                "{} ! {} ({}) heartbeat stale",
+                                time, id_short, event.hostname,
+                            );
+                        }
+                        pacinet_proto::NodeEventType::NodeEventRemoved => {
+                            println!(
+                                "{} - {} ({}) removed",
+                                time, id_short, event.hostname,
+                            );
+                        }
+                        _ => {
+                            println!(
+                                "{} ? {} ({}) unknown event",
+                                time, id_short, event.hostname,
+                            );
+                        }
+                    }
+                }
             }
         }
     }

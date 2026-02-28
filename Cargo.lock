@@ -1253,6 +1253,7 @@ dependencies = [
  "serde_yaml",
  "similar",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
@@ -1288,6 +1289,7 @@ name = "pacinet-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "chrono",
  "clap",
  "metrics",

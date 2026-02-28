@@ -445,3 +445,83 @@ Implement Phase 5b: Counter rate tracking (timestamped counter snapshots with ra
 ### Git Operations
 - Committed Phase 5b changes
 - Pushed to GitHub
+
+## Session 7 — gRPC Server-Side Streaming (Phase 6) (2026-02-27)
+
+### Prompt
+Implement Phase 6: gRPC server-side streaming for real-time event observation. Add 3 streaming RPCs (WatchFsmEvents, WatchCounters, WatchNodeEvents), an EventBus with broadcast channels, event emission from services and FSM engine, CLI watch subcommands, and integration tests.
+
+### Actions Taken
+
+#### 1. Proto Changes
+- Added 3 streaming RPCs to PaciNetManagement service: WatchFsmEvents, WatchCounters, WatchNodeEvents
+- Added 8 new message types: WatchFsmEventsRequest, FsmEvent, WatchCountersRequest, CounterUpdate, CounterRateInfo, WatchNodeEventsRequest, NodeEvent
+- Added 2 enums: FsmEventType (Transition/DeployProgress/InstanceCompleted), NodeEventType (Registered/StateChanged/HeartbeatStale/Removed)
+
+#### 2. Dependency Changes
+- Added `async-stream = "0.3"` to workspace Cargo.toml
+- Moved `tokio-stream` from dev-dependencies to dependencies in pacinet-server
+- Added `async-stream = { workspace = true }` to pacinet-server
+- Added `tokio-stream = { workspace = true }` to pacinet-cli
+
+#### 3. EventBus (`pacinet-server/src/events.rs`) — NEW
+- Domain event types: `FsmEvent` (Transition, DeployProgress, InstanceCompleted), `CounterEvent`, `CounterRateData`, `NodeEvent` (Registered, StateChanged, HeartbeatStale, Removed)
+- `EventBus` struct wrapping three `tokio::sync::broadcast` channels
+- `emit_fsm()`, `emit_counter()`, `emit_node()` methods (silently drop if no receivers)
+- Helper methods: `FsmEvent::instance_id()`, `NodeEvent::node_id()`, `NodeEvent::labels()`
+
+#### 4. Service Modifications (`pacinet-server/src/service.rs`)
+- Added `event_bus: Option<EventBus>` field + `with_event_bus()` builder to ControllerService and ManagementService
+- Event emission in `register_node()` (NodeEvent::Registered), `heartbeat()` (NodeEvent::StateChanged), `report_counters()` (CounterEvent with rates), `remove_node()` (NodeEvent::Removed)
+- Implemented 3 streaming RPC trait methods using `async_stream::try_stream!`
+- Added `Pin<Box<dyn Stream>>` type aliases for streaming response types
+- Added 3 domain→proto conversion helpers: `domain_fsm_to_proto()`, `domain_counter_to_proto()`, `domain_node_to_proto()`
+
+#### 5. FSM Engine Modifications (`pacinet-server/src/fsm_engine.rs`)
+- Added `event_bus: Option<EventBus>` field + `with_event_bus()` builder
+- Emit FsmEvent::Transition in `fire_transition()` after state change
+- Emit FsmEvent::InstanceCompleted in `fire_transition()` when terminal state reached
+- Emit FsmEvent::InstanceCompleted in `cancel_instance()` with status "cancelled"
+- Emit FsmEvent::DeployProgress in `execute_deploy()` after updating context
+
+#### 6. Main.rs Wiring
+- Create `EventBus::new(256)` after storage creation
+- Pass `event_bus.clone()` to FsmEngine, ControllerService, ManagementService via `.with_event_bus()`
+- Updated stale reaper to fetch node info and emit `NodeEvent::HeartbeatStale` for each stale node
+
+#### 7. CLI Watch Subcommands (`pacinet-cli/src/main.rs`)
+- Added `Watch` top-level subcommand with 3 sub-subcommands: Fsm, Counters, Nodes
+- `pacinet watch fsm [--instance <id>]` — stream FSM transitions with human-readable format
+- `pacinet watch counters [--node <id>]` — stream counter rates with per-rule display
+- `pacinet watch nodes [--label key=val]` — stream node lifecycle events
+- JSON output via `--json` flag on all watch commands
+- Uses `tokio_stream::StreamExt` for stream consumption
+
+#### 8. Integration Tests
+- Added `start_controller_with_events()` helper returning `(u16, EventBus)`
+- `test_watch_node_events_registration`: subscribe to WatchNodeEvents, register node, verify Registered event
+- `test_watch_counters_report`: subscribe to WatchCounters with node filter, report counters, verify CounterUpdate
+- `test_watch_counters_filter`: two nodes, watch one, verify only filtered events
+- `test_watch_fsm_transition`: set up FSM, start instance, advance, verify transition + completed events
+
+#### 9. Documentation
+- Updated CLAUDE.md: streaming features, gRPC services list, EventBus design decisions
+- Updated OVERVIEW.md: component descriptions, status to Phase 6, technology stack
+- Updated REQUIREMENTS.md: section 4 (Server-Side Streaming), CLI watch commands, gRPC services, streaming integration tests
+- Updated PROMPT_HISTORY.md: Session 7
+
+### Errors Encountered & Fixed
+- **Prost enum variant naming**: Used `FsmEventType::Transition` but prost generates `FsmEventType::FsmEventTransition` because proto values have `FSM_EVENT_` prefix which doesn't match the enum name pattern `FSM_EVENT_TYPE`. Fixed by using full generated names throughout service.rs and CLI.
+- **Edit tool uniqueness**: Assertion blocks matched in multiple test functions. Fixed by including unique surrounding context.
+
+### Test Results
+- 93 tests total, all passing:
+  - 32 core tests
+  - 30 server unit tests (18 storage + 6 counter_cache + 6 counter_rate)
+  - 10 agent tests
+  - 21 integration tests (17 existing + 4 new streaming)
+- cargo clippy --workspace -- -D warnings: clean
+
+### Git Operations
+- Committed Phase 6 changes
+- Pushed to GitHub

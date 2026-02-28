@@ -67,6 +67,11 @@ service PaciNetManagement {
   rpc ListFsmInstances(ListFsmInstancesRequest) returns (ListFsmInstancesResponse);
   rpc AdvanceFsm(AdvanceFsmRequest) returns (AdvanceFsmResponse);
   rpc CancelFsm(CancelFsmRequest) returns (CancelFsmResponse);
+
+  // Phase 6: Server-side streaming for live event watching
+  rpc WatchFsmEvents(WatchFsmEventsRequest) returns (stream FsmEvent);
+  rpc WatchCounters(WatchCountersRequest) returns (stream CounterUpdate);
+  rpc WatchNodeEvents(WatchNodeEventsRequest) returns (stream NodeEvent);
 }
 
 // ============================================================================
@@ -475,4 +480,83 @@ message CancelFsmRequest {
 message CancelFsmResponse {
   bool success = 1;
   string message = 2;
+}
+
+// ============================================================================
+// Phase 6: Streaming event messages
+// ============================================================================
+
+// --- FSM event streaming ---
+
+message WatchFsmEventsRequest {
+  string instance_id = 1;  // optional: filter by instance
+}
+
+enum FsmEventType {
+  FSM_EVENT_UNSPECIFIED = 0;
+  FSM_EVENT_TRANSITION = 1;
+  FSM_EVENT_DEPLOY_PROGRESS = 2;
+  FSM_EVENT_INSTANCE_COMPLETED = 3;
+}
+
+message FsmEvent {
+  FsmEventType event_type = 1;
+  string instance_id = 2;
+  string definition_name = 3;
+  // For TRANSITION
+  string from_state = 4;
+  string to_state = 5;
+  string trigger = 6;
+  string message = 7;
+  // For DEPLOY_PROGRESS
+  uint32 deployed_nodes = 8;
+  uint32 failed_nodes = 9;
+  uint32 target_nodes = 10;
+  // For INSTANCE_COMPLETED
+  string final_status = 11;
+  google.protobuf.Timestamp timestamp = 12;
+}
+
+// --- Counter update streaming ---
+
+message WatchCountersRequest {
+  string node_id = 1;  // optional: filter by node
+}
+
+message CounterUpdate {
+  string node_id = 1;
+  repeated CounterRateInfo counters = 2;
+  google.protobuf.Timestamp collected_at = 3;
+}
+
+message CounterRateInfo {
+  string rule_name = 1;
+  uint64 match_count = 2;
+  uint64 byte_count = 3;
+  double matches_per_second = 4;
+  double bytes_per_second = 5;
+}
+
+// --- Node event streaming ---
+
+message WatchNodeEventsRequest {
+  map<string, string> label_filter = 1;  // optional: filter by labels
+}
+
+enum NodeEventType {
+  NODE_EVENT_UNSPECIFIED = 0;
+  NODE_EVENT_REGISTERED = 1;
+  NODE_EVENT_STATE_CHANGED = 2;
+  NODE_EVENT_HEARTBEAT_STALE = 3;
+  NODE_EVENT_REMOVED = 4;
+}
+
+message NodeEvent {
+  NodeEventType event_type = 1;
+  string node_id = 2;
+  string hostname = 3;
+  map<string, string> labels = 4;
+  NodeState old_state = 5;
+  NodeState new_state = 6;
+  google.protobuf.Timestamp timestamp = 7;
 }

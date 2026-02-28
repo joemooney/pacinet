@@ -139,19 +139,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Counter snapshot cache initialized"
     );
 
+    // Create event bus for streaming RPCs
+    let event_bus = pacinet_server::events::EventBus::new(256);
+    info!("Event bus initialized (buffer=256)");
+
     // Create FSM engine
-    let fsm_engine = Arc::new(pacinet_server::fsm_engine::FsmEngine::new(
-        storage.clone(),
-        config.clone(),
-        tls_config.clone(),
-        counter_cache.clone(),
-    ));
+    let fsm_engine = Arc::new(
+        pacinet_server::fsm_engine::FsmEngine::new(
+            storage.clone(),
+            config.clone(),
+            tls_config.clone(),
+            counter_cache.clone(),
+        )
+        .with_event_bus(event_bus.clone()),
+    );
 
     let controller_service = service::ControllerService::new(storage.clone())
-        .with_counter_cache(counter_cache.clone());
+        .with_counter_cache(counter_cache.clone())
+        .with_event_bus(event_bus.clone());
     let management_service = service::ManagementService::new(storage.clone(), config.clone())
         .with_tls(tls_config.clone())
-        .with_fsm_engine(fsm_engine.clone());
+        .with_fsm_engine(fsm_engine.clone())
+        .with_event_bus(event_bus.clone());
 
     // Spawn FSM engine evaluation loop
     let (fsm_shutdown_tx, fsm_shutdown_rx) = tokio::sync::watch::channel(false);
@@ -166,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stale_threshold = config.stale_threshold();
     let reaper_start = config.start_time;
     let reaper_cache = counter_cache.clone();
+    let reaper_event_bus = event_bus.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(reaper_interval);
         loop {
@@ -200,6 +210,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     for id in &stale_ids {
                         warn!(node_id = %id, "Node marked offline (missed heartbeats)");
+                        // Emit HeartbeatStale event
+                        let nid = id.clone();
+                        let s = reaper_storage.clone();
+                        if let Ok(Ok(Some(node))) =
+                            tokio::task::spawn_blocking(move || s.get_node(&nid)).await
+                        {
+                            reaper_event_bus.emit_node(
+                                pacinet_server::events::NodeEvent::HeartbeatStale {
+                                    node_id: node.node_id.clone(),
+                                    hostname: node.hostname.clone(),
+                                    labels: node.labels.clone(),
+                                    timestamp: chrono::Utc::now(),
+                                },
+                            );
+                        }
                     }
                 }
                 Ok(Err(e)) => warn!("Stale node check failed: {}", e),

@@ -9,6 +9,8 @@
 - **Adaptive policy FSMs**: counter-rate-driven state machines for automated escalation/de-escalation (e.g., DDoS mitigation)
 - **Counter rate tracking**: in-memory ring buffer of counter snapshots, rate calculation, multi-node aggregation (any/all/sum)
 - **Webhook alerts**: FSM alert actions deliver JSON payloads via HTTP webhooks with bearer/basic auth and retry
+- **Server-side streaming**: WatchFsmEvents, WatchCounters, WatchNodeEvents for real-time event observation
+- **EventBus**: broadcast channels (FSM, counter, node) for decoupled event emission and streaming delivery
 - **FSM orchestration**: background evaluation loop, condition-driven transitions, timer transitions, manual advance
 - **PacGate integration**: agent invokes `pacgate` CLI as subprocess (YAML interface)
 - **PacGateBackend abstraction**: Real (subprocess) or Mock (for testing)
@@ -48,7 +50,7 @@
 ### gRPC Services
 - **PaciNetController** (agent → controller): RegisterNode, Heartbeat, ReportCounters
 - **PaciNetAgent** (controller → agent): DeployRules, GetCounters, GetStatus
-- **PaciNetManagement** (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy, CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm
+- **PaciNetManagement** (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy, CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm, WatchFsmEvents (stream), WatchCounters (stream), WatchNodeEvents (stream)
 
 ## Common Commands
 ```bash
@@ -90,6 +92,9 @@ make test-all                  # Run tests + clippy
 - **ConditionDefinition enum ordering**: Counter, Simple, Compound — critical for `serde(untagged)` deserialization (Counter has required `counter` field, Simple before Compound to prevent all-optional Compound matching first)
 - **FSM storage**: JSON blob storage in both MemoryStorage and SqliteStorage
 - **ActionDefinition as struct**: uses optional fields (deploy/rollback/alert) rather than enum due to serde_yaml 0.9 tag requirements
+- **EventBus**: wraps three `tokio::sync::broadcast` channels (FSM, counter, node); created once in main.rs, cloned into services; `Option<EventBus>` for backward compatibility
+- **Server-side streaming**: `async_stream::try_stream!` macro with `Pin<Box<dyn Stream>>` return type; `RecvError::Lagged` warns and continues, `RecvError::Closed` breaks
+- **Domain→proto event conversion**: separate helper functions per event type to keep streaming RPCs clean
 - Proto types do NOT have serde derives (prost_types::Timestamp incompatibility)
 - Domain types in pacinet-core have serde derives for JSON serialization
 - Both server and agent expose lib targets for integration testing

@@ -1,13 +1,19 @@
 use crate::config::ControllerConfig;
 use crate::counter_cache::CounterSnapshotCache;
+use crate::counter_rate;
+use crate::events::{
+    CounterEvent, CounterRateData, EventBus, FsmEvent as DomainFsmEvent, NodeEvent,
+};
 use crate::fsm_engine::FsmEngine;
 use crate::metrics as m;
 use crate::storage::blocking;
 use pacinet_core::model::{Node, Policy};
 use pacinet_core::{CounterSnapshot, Storage};
 use pacinet_proto::*;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::task::JoinSet;
+use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
@@ -18,6 +24,7 @@ use tracing::{info, warn};
 pub struct ControllerService {
     storage: Arc<dyn Storage>,
     counter_cache: Option<Arc<CounterSnapshotCache>>,
+    event_bus: Option<EventBus>,
 }
 
 impl ControllerService {
@@ -25,11 +32,17 @@ impl ControllerService {
         Self {
             storage,
             counter_cache: None,
+            event_bus: None,
         }
     }
 
     pub fn with_counter_cache(mut self, cache: Arc<CounterSnapshotCache>) -> Self {
         self.counter_cache = Some(cache);
+        self
+    }
+
+    pub fn with_event_bus(mut self, event_bus: EventBus) -> Self {
+        self.event_bus = Some(event_bus);
         self
     }
 }
@@ -48,6 +61,8 @@ impl paci_net_controller_server::PaciNetController for ControllerService {
             "Node registration request"
         );
 
+        let hostname = req.hostname.clone();
+        let labels = req.labels.clone();
         let node = Node::new(
             req.hostname,
             req.agent_address,
@@ -57,6 +72,15 @@ impl paci_net_controller_server::PaciNetController for ControllerService {
         let node_id = blocking(&self.storage, move |s| s.register_node(node)).await?;
 
         info!(node_id = %node_id, "Node registered successfully");
+
+        if let Some(ref bus) = self.event_bus {
+            bus.emit_node(NodeEvent::Registered {
+                node_id: node_id.clone(),
+                hostname,
+                labels,
+                timestamp: chrono::Utc::now(),
+            });
+        }
 
         Ok(Response::new(RegisterNodeResponse {
             node_id,
@@ -71,21 +95,47 @@ impl paci_net_controller_server::PaciNetController for ControllerService {
         request: Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatResponse>, Status> {
         let req = request.into_inner();
-        let state = pacinet_core::NodeState::from(
+        let new_state = pacinet_core::NodeState::from(
             NodeState::try_from(req.state).unwrap_or(NodeState::Online),
         );
         let uptime = req.uptime_seconds;
         let node_id = req.node_id.clone();
         let node_id_log = req.node_id.clone();
 
+        // Fetch node before update to detect state changes
+        let old_node = if self.event_bus.is_some() {
+            let nid = req.node_id.clone();
+            blocking(&self.storage, move |s| s.get_node(&nid))
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        let state_for_update = new_state.clone();
         let found = blocking(&self.storage, move |s| {
-            s.update_heartbeat(&node_id, state, uptime)
+            s.update_heartbeat(&node_id, state_for_update, uptime)
         })
         .await?;
 
         if !found {
             warn!(node_id = %node_id_log, "Heartbeat from unknown node");
             return Err(Status::not_found("Node not registered"));
+        }
+
+        // Emit state change event if state differs
+        if let (Some(ref bus), Some(ref node)) = (&self.event_bus, &old_node) {
+            if node.state != new_state {
+                bus.emit_node(NodeEvent::StateChanged {
+                    node_id: node.node_id.clone(),
+                    hostname: node.hostname.clone(),
+                    labels: node.labels.clone(),
+                    old_state: node.state.to_string(),
+                    new_state: new_state.to_string(),
+                    timestamp: chrono::Utc::now(),
+                });
+            }
         }
 
         m::record_heartbeat();
@@ -117,6 +167,51 @@ impl paci_net_controller_server::PaciNetController for ControllerService {
             };
             cache.record(snapshot);
             m::record_counter_snapshot();
+
+            // Emit counter event with rates
+            if let Some(ref bus) = self.event_bus {
+                let rate_data: Vec<CounterRateData> = if let Some((older, newer)) =
+                    cache.latest_pair(&node_id)
+                {
+                    counters
+                        .iter()
+                        .map(|c| {
+                            let rate =
+                                counter_rate::calculate_rate(&older, &newer, &c.rule_name);
+                            CounterRateData {
+                                rule_name: c.rule_name.clone(),
+                                match_count: c.match_count,
+                                byte_count: c.byte_count,
+                                matches_per_second: rate
+                                    .as_ref()
+                                    .map(|r| r.matches_per_second)
+                                    .unwrap_or(0.0),
+                                bytes_per_second: rate
+                                    .as_ref()
+                                    .map(|r| r.bytes_per_second)
+                                    .unwrap_or(0.0),
+                            }
+                        })
+                        .collect()
+                } else {
+                    counters
+                        .iter()
+                        .map(|c| CounterRateData {
+                            rule_name: c.rule_name.clone(),
+                            match_count: c.match_count,
+                            byte_count: c.byte_count,
+                            matches_per_second: 0.0,
+                            bytes_per_second: 0.0,
+                        })
+                        .collect()
+                };
+
+                bus.emit_counter(CounterEvent {
+                    node_id: node_id.clone(),
+                    counters: rate_data,
+                    collected_at,
+                });
+            }
         }
 
         blocking(&self.storage, move |s| s.store_counters(&node_id, counters)).await?;
@@ -134,6 +229,7 @@ pub struct ManagementService {
     config: ControllerConfig,
     tls_config: Option<pacinet_core::tls::TlsConfig>,
     fsm_engine: Option<Arc<FsmEngine>>,
+    event_bus: Option<EventBus>,
 }
 
 impl ManagementService {
@@ -143,6 +239,7 @@ impl ManagementService {
             config,
             tls_config: None,
             fsm_engine: None,
+            event_bus: None,
         }
     }
 
@@ -153,6 +250,11 @@ impl ManagementService {
 
     pub fn with_fsm_engine(mut self, engine: Arc<FsmEngine>) -> Self {
         self.fsm_engine = Some(engine);
+        self
+    }
+
+    pub fn with_event_bus(mut self, event_bus: EventBus) -> Self {
+        self.event_bus = Some(event_bus);
         self
     }
 }
@@ -230,11 +332,31 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
         request: Request<RemoveNodeRequest>,
     ) -> Result<Response<RemoveNodeResponse>, Status> {
         let req = request.into_inner();
+
+        // Fetch node before removal for event emission
+        let node_before = if self.event_bus.is_some() {
+            let nid = req.node_id.clone();
+            blocking(&self.storage, move |s| s.get_node(&nid))
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
         let node_id = req.node_id.clone();
         let removed = blocking(&self.storage, move |s| s.remove_node(&node_id)).await?;
 
         if removed {
             info!(node_id = %req.node_id, "Node removed");
+            if let (Some(ref bus), Some(ref node)) = (&self.event_bus, &node_before) {
+                bus.emit_node(NodeEvent::Removed {
+                    node_id: node.node_id.clone(),
+                    hostname: node.hostname.clone(),
+                    labels: node.labels.clone(),
+                    timestamp: chrono::Utc::now(),
+                });
+            }
         }
 
         Ok(Response::new(RemoveNodeResponse {
@@ -626,6 +748,148 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
         }
     }
 
+    // ---- Phase 6: Streaming RPCs ----
+
+    type WatchFsmEventsStream =
+        Pin<Box<dyn Stream<Item = Result<FsmEvent, Status>> + Send + 'static>>;
+    type WatchCountersStream =
+        Pin<Box<dyn Stream<Item = Result<CounterUpdate, Status>> + Send + 'static>>;
+    type WatchNodeEventsStream =
+        Pin<Box<dyn Stream<Item = Result<pacinet_proto::NodeEvent, Status>> + Send + 'static>>;
+
+    async fn watch_fsm_events(
+        &self,
+        request: Request<WatchFsmEventsRequest>,
+    ) -> Result<Response<Self::WatchFsmEventsStream>, Status> {
+        let req = request.into_inner();
+        let filter_instance = if req.instance_id.is_empty() {
+            None
+        } else {
+            Some(req.instance_id)
+        };
+
+        let bus = self
+            .event_bus
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("Event streaming not available"))?;
+
+        let mut rx = bus.fsm_tx.subscribe();
+
+        let stream = async_stream::try_stream! {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let Some(ref id) = filter_instance {
+                            if event.instance_id() != id {
+                                continue;
+                            }
+                        }
+                        yield domain_fsm_to_proto(&event);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "FSM event stream lagged");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn watch_counters(
+        &self,
+        request: Request<WatchCountersRequest>,
+    ) -> Result<Response<Self::WatchCountersStream>, Status> {
+        let req = request.into_inner();
+        let filter_node = if req.node_id.is_empty() {
+            None
+        } else {
+            Some(req.node_id)
+        };
+
+        let bus = self
+            .event_bus
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("Event streaming not available"))?;
+
+        let mut rx = bus.counter_tx.subscribe();
+
+        let stream = async_stream::try_stream! {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let Some(ref id) = filter_node {
+                            if event.node_id != *id {
+                                continue;
+                            }
+                        }
+                        yield domain_counter_to_proto(&event);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Counter event stream lagged");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn watch_node_events(
+        &self,
+        request: Request<WatchNodeEventsRequest>,
+    ) -> Result<Response<Self::WatchNodeEventsStream>, Status> {
+        let req = request.into_inner();
+        let label_filter = if req.label_filter.is_empty() {
+            None
+        } else {
+            Some(req.label_filter)
+        };
+
+        let bus = self
+            .event_bus
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("Event streaming not available"))?;
+
+        let mut rx = bus.node_tx.subscribe();
+
+        let stream = async_stream::try_stream! {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let Some(ref filter) = label_filter {
+                            let event_labels = event.labels();
+                            let matches = filter.iter().all(|(k, v)| {
+                                event_labels.get(k).map(|ev| ev == v).unwrap_or(false)
+                            });
+                            if !matches {
+                                continue;
+                            }
+                        }
+                        yield domain_node_to_proto(&event);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Node event stream lagged");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
     // ---- Phase 5: FSM RPCs ----
 
     #[tracing::instrument(skip(self, request))]
@@ -916,6 +1180,190 @@ fn instance_to_proto(instance: &pacinet_core::FsmInstance) -> FsmInstanceInfo {
         deployed_nodes: instance.context.deployed_nodes.len() as u32,
         failed_nodes: instance.context.failed_nodes.len() as u32,
         target_nodes: instance.context.target_nodes.len() as u32,
+    }
+}
+
+// ---- Proto conversion helpers for streaming events ----
+
+fn domain_fsm_to_proto(event: &DomainFsmEvent) -> FsmEvent {
+    match event {
+        DomainFsmEvent::Transition {
+            instance_id,
+            definition_name,
+            from_state,
+            to_state,
+            trigger,
+            message,
+            timestamp,
+        } => FsmEvent {
+            event_type: FsmEventType::FsmEventTransition.into(),
+            instance_id: instance_id.clone(),
+            definition_name: definition_name.clone(),
+            from_state: from_state.clone(),
+            to_state: to_state.clone(),
+            trigger: trigger.clone(),
+            message: message.clone(),
+            deployed_nodes: 0,
+            failed_nodes: 0,
+            target_nodes: 0,
+            final_status: String::new(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: timestamp.timestamp(),
+                nanos: 0,
+            }),
+        },
+        DomainFsmEvent::DeployProgress {
+            instance_id,
+            definition_name,
+            deployed_nodes,
+            failed_nodes,
+            target_nodes,
+            timestamp,
+        } => FsmEvent {
+            event_type: FsmEventType::FsmEventDeployProgress.into(),
+            instance_id: instance_id.clone(),
+            definition_name: definition_name.clone(),
+            from_state: String::new(),
+            to_state: String::new(),
+            trigger: String::new(),
+            message: String::new(),
+            deployed_nodes: *deployed_nodes,
+            failed_nodes: *failed_nodes,
+            target_nodes: *target_nodes,
+            final_status: String::new(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: timestamp.timestamp(),
+                nanos: 0,
+            }),
+        },
+        DomainFsmEvent::InstanceCompleted {
+            instance_id,
+            definition_name,
+            final_status,
+            timestamp,
+        } => FsmEvent {
+            event_type: FsmEventType::FsmEventInstanceCompleted.into(),
+            instance_id: instance_id.clone(),
+            definition_name: definition_name.clone(),
+            from_state: String::new(),
+            to_state: String::new(),
+            trigger: String::new(),
+            message: String::new(),
+            deployed_nodes: 0,
+            failed_nodes: 0,
+            target_nodes: 0,
+            final_status: final_status.clone(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: timestamp.timestamp(),
+                nanos: 0,
+            }),
+        },
+    }
+}
+
+fn domain_counter_to_proto(event: &CounterEvent) -> CounterUpdate {
+    CounterUpdate {
+        node_id: event.node_id.clone(),
+        counters: event
+            .counters
+            .iter()
+            .map(|c| CounterRateInfo {
+                rule_name: c.rule_name.clone(),
+                match_count: c.match_count,
+                byte_count: c.byte_count,
+                matches_per_second: c.matches_per_second,
+                bytes_per_second: c.bytes_per_second,
+            })
+            .collect(),
+        collected_at: Some(prost_types::Timestamp {
+            seconds: event.collected_at.timestamp(),
+            nanos: 0,
+        }),
+    }
+}
+
+fn domain_node_to_proto(event: &NodeEvent) -> pacinet_proto::NodeEvent {
+    match event {
+        NodeEvent::Registered {
+            node_id,
+            hostname,
+            labels,
+            timestamp,
+        } => pacinet_proto::NodeEvent {
+            event_type: NodeEventType::NodeEventRegistered.into(),
+            node_id: node_id.clone(),
+            hostname: hostname.clone(),
+            labels: labels.clone(),
+            old_state: NodeState::Unspecified.into(),
+            new_state: NodeState::Registered.into(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: timestamp.timestamp(),
+                nanos: 0,
+            }),
+        },
+        NodeEvent::StateChanged {
+            node_id,
+            hostname,
+            labels,
+            old_state,
+            new_state,
+            timestamp,
+        } => {
+            let old = old_state
+                .parse::<pacinet_core::NodeState>()
+                .map(|s| pacinet_proto::NodeState::from(s) as i32)
+                .unwrap_or(0);
+            let new = new_state
+                .parse::<pacinet_core::NodeState>()
+                .map(|s| pacinet_proto::NodeState::from(s) as i32)
+                .unwrap_or(0);
+            pacinet_proto::NodeEvent {
+                event_type: NodeEventType::NodeEventStateChanged.into(),
+                node_id: node_id.clone(),
+                hostname: hostname.clone(),
+                labels: labels.clone(),
+                old_state: old,
+                new_state: new,
+                timestamp: Some(prost_types::Timestamp {
+                    seconds: timestamp.timestamp(),
+                    nanos: 0,
+                }),
+            }
+        }
+        NodeEvent::HeartbeatStale {
+            node_id,
+            hostname,
+            labels,
+            timestamp,
+        } => pacinet_proto::NodeEvent {
+            event_type: NodeEventType::NodeEventHeartbeatStale.into(),
+            node_id: node_id.clone(),
+            hostname: hostname.clone(),
+            labels: labels.clone(),
+            old_state: NodeState::Unspecified.into(),
+            new_state: NodeState::Offline.into(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: timestamp.timestamp(),
+                nanos: 0,
+            }),
+        },
+        NodeEvent::Removed {
+            node_id,
+            hostname,
+            labels,
+            timestamp,
+        } => pacinet_proto::NodeEvent {
+            event_type: NodeEventType::NodeEventRemoved.into(),
+            node_id: node_id.clone(),
+            hostname: hostname.clone(),
+            labels: labels.clone(),
+            old_state: NodeState::Unspecified.into(),
+            new_state: NodeState::Unspecified.into(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: timestamp.timestamp(),
+                nanos: 0,
+            }),
+        },
     }
 }
 

@@ -22,3 +22,4 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 similar = "2"
+tokio-stream = { workspace = true }
