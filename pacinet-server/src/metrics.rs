@@ -66,3 +66,24 @@ pub fn record_fsm_instance_status(status: &str) {
 pub fn update_fsm_running_gauge(count: usize) {
     metrics::gauge!("pacinet_fsm_instances_running").set(count as f64);
 }
+
+/// Record a counter snapshot ingestion.
+pub fn record_counter_snapshot() {
+    metrics::counter!("pacinet_counter_snapshots_total").increment(1);
+}
+
+/// Update counter snapshot cache gauge.
+pub fn update_counter_snapshot_gauge(count: usize) {
+    metrics::gauge!("pacinet_counter_snapshots_cached").set(count as f64);
+}
+
+/// Record a webhook delivery attempt.
+pub fn record_webhook_delivery(result: &str) {
+    metrics::counter!("pacinet_webhook_deliveries_total", "result" => result.to_string())
+        .increment(1);
+}
+
+/// Record a counter condition evaluation.
+pub fn record_counter_eval(result: &str) {
+    metrics::counter!("pacinet_counter_evals_total", "result" => result.to_string()).increment(1);
+}

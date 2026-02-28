@@ -10,6 +10,7 @@ use pacinet_agent::service::{AgentService, AgentState};
 use pacinet_core::Storage;
 use pacinet_proto::*;
 use pacinet_server::config::ControllerConfig;
+use pacinet_server::counter_cache::CounterSnapshotCache;
 use pacinet_server::fsm_engine::FsmEngine;
 use pacinet_server::service::{ControllerService, ManagementService};
 use pacinet_server::storage::MemoryStorage;
@@ -106,14 +107,27 @@ async fn register_node(
     reg_resp.node_id
 }
 
-/// Start the controller with FSM engine enabled. Returns the port.
-async fn start_controller_with_fsm(storage: Arc<dyn Storage>) -> u16 {
+/// Start the controller with FSM engine enabled. Returns the port and counter cache.
+async fn start_controller_with_fsm(
+    storage: Arc<dyn Storage>,
+) -> (u16, Arc<CounterSnapshotCache>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    let controller_service = ControllerService::new(storage.clone());
+    let counter_cache = Arc::new(CounterSnapshotCache::new(
+        chrono::Duration::hours(1),
+        120,
+    ));
+
+    let controller_service = ControllerService::new(storage.clone())
+        .with_counter_cache(counter_cache.clone());
     let config = ControllerConfig::default();
-    let fsm_engine = Arc::new(FsmEngine::new(storage.clone(), config.clone(), None));
+    let fsm_engine = Arc::new(FsmEngine::new(
+        storage.clone(),
+        config.clone(),
+        None,
+        counter_cache.clone(),
+    ));
 
     // Spawn FSM engine eval loop
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -141,7 +155,7 @@ async fn start_controller_with_fsm(storage: Arc<dyn Storage>) -> u16 {
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    port
+    (port, counter_cache)
 }
 
 /// Full happy path: register node, deploy policy, push counters, query counters.
@@ -658,7 +672,7 @@ states:
 #[tokio::test]
 async fn test_fsm_definition_crud() {
     let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
-    let ctrl_port = start_controller_with_fsm(storage.clone()).await;
+    let (ctrl_port, _counter_cache) = start_controller_with_fsm(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     let mut mgmt =
@@ -723,7 +737,7 @@ async fn test_fsm_definition_crud() {
 #[tokio::test]
 async fn test_fsm_start_and_auto_complete() {
     let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
-    let ctrl_port = start_controller_with_fsm(storage.clone()).await;
+    let (ctrl_port, _counter_cache) = start_controller_with_fsm(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Start agent with mock PacGate (success)
@@ -764,6 +778,7 @@ async fn test_fsm_start_and_auto_complete() {
                 rate_limit: false,
                 conntrack: false,
             }),
+            target_label_filter: HashMap::new(),
         })
         .await
         .unwrap()
@@ -800,7 +815,7 @@ async fn test_fsm_start_and_auto_complete() {
 #[tokio::test]
 async fn test_fsm_manual_advance() {
     let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
-    let ctrl_port = start_controller_with_fsm(storage.clone()).await;
+    let (ctrl_port, _counter_cache) = start_controller_with_fsm(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Start agent
@@ -834,6 +849,7 @@ async fn test_fsm_manual_advance() {
             definition_name: "manual-gate".to_string(),
             rules_yaml: "rules: []".to_string(),
             options: None,
+            target_label_filter: HashMap::new(),
         })
         .await
         .unwrap()
@@ -884,7 +900,7 @@ async fn test_fsm_manual_advance() {
 #[tokio::test]
 async fn test_fsm_cancel_running_instance() {
     let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
-    let ctrl_port = start_controller_with_fsm(storage.clone()).await;
+    let (ctrl_port, _counter_cache) = start_controller_with_fsm(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     let mut mgmt =
@@ -905,6 +921,7 @@ async fn test_fsm_cancel_running_instance() {
             definition_name: "timer-transition".to_string(),
             rules_yaml: "rules: []".to_string(),
             options: None,
+            target_label_filter: HashMap::new(),
         })
         .await
         .unwrap()
@@ -939,7 +956,7 @@ async fn test_fsm_cancel_running_instance() {
 #[tokio::test]
 async fn test_fsm_list_instances() {
     let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
-    let ctrl_port = start_controller_with_fsm(storage.clone()).await;
+    let (ctrl_port, _counter_cache) = start_controller_with_fsm(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     let mut mgmt =
@@ -966,6 +983,7 @@ async fn test_fsm_list_instances() {
             definition_name: "timer-transition".to_string(),
             rules_yaml: "rules: []".to_string(),
             options: None,
+            target_label_filter: HashMap::new(),
         })
         .await
         .unwrap()
@@ -977,6 +995,7 @@ async fn test_fsm_list_instances() {
             definition_name: "manual-gate".to_string(),
             rules_yaml: "rules: []".to_string(),
             options: None,
+            target_label_filter: HashMap::new(),
         })
         .await
         .unwrap()
@@ -1022,7 +1041,7 @@ async fn test_fsm_list_instances() {
 #[tokio::test]
 async fn test_fsm_deploy_failure_triggers_transition() {
     let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
-    let ctrl_port = start_controller_with_fsm(storage.clone()).await;
+    let (ctrl_port, _counter_cache) = start_controller_with_fsm(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Register node pointing to dead agent address
@@ -1048,6 +1067,7 @@ async fn test_fsm_deploy_failure_triggers_transition() {
             definition_name: "simple-deploy".to_string(),
             rules_yaml: "rules: []".to_string(),
             options: None,
+            target_label_filter: HashMap::new(),
         })
         .await
         .unwrap()
@@ -1073,4 +1093,323 @@ async fn test_fsm_deploy_failure_triggers_transition() {
         info.status, info.current_state
     );
     assert_eq!(info.current_state, "failed");
+}
+
+// ============================================================================
+// Phase 5b: Counter rate tracking & adaptive policy FSM tests
+// ============================================================================
+
+/// Counter snapshot cache: basic record, query, eviction.
+#[tokio::test]
+async fn test_counter_snapshot_cache_basic() {
+    use pacinet_core::{CounterSnapshot, RuleCounter};
+    use pacinet_server::counter_cache::CounterSnapshotCache;
+
+    let cache = CounterSnapshotCache::new(chrono::Duration::hours(1), 100);
+
+    let now = chrono::Utc::now();
+    let snap1 = CounterSnapshot {
+        node_id: "node-1".to_string(),
+        collected_at: now - chrono::Duration::seconds(10),
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 1000,
+            byte_count: 100000,
+        }],
+    };
+    let snap2 = CounterSnapshot {
+        node_id: "node-1".to_string(),
+        collected_at: now,
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 2000,
+            byte_count: 200000,
+        }],
+    };
+
+    cache.record(snap1);
+    cache.record(snap2);
+
+    // Latest pair
+    let (older, newer) = cache.latest_pair("node-1").unwrap();
+    assert_eq!(older.counters[0].match_count, 1000);
+    assert_eq!(newer.counters[0].match_count, 2000);
+
+    // Latest
+    let latest = cache.latest("node-1").unwrap();
+    assert_eq!(latest.counters[0].match_count, 2000);
+
+    // Node not found
+    assert!(cache.latest("nonexistent").is_none());
+}
+
+/// Counter rate calculation: basic rate, counter reset.
+#[tokio::test]
+async fn test_counter_rate_calculation() {
+    use pacinet_core::{CounterSnapshot, RuleCounter};
+    use pacinet_server::counter_rate;
+
+    let now = chrono::Utc::now();
+    let older = CounterSnapshot {
+        node_id: "n1".to_string(),
+        collected_at: now - chrono::Duration::seconds(10),
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 1000,
+            byte_count: 100000,
+        }],
+    };
+    let newer = CounterSnapshot {
+        node_id: "n1".to_string(),
+        collected_at: now,
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 2000,
+            byte_count: 200000,
+        }],
+    };
+
+    let rate = counter_rate::calculate_rate(&older, &newer, "drop_all").unwrap();
+    // 1000 matches in 10 seconds = ~100/s
+    assert!((rate.matches_per_second - 100.0).abs() < 1.0);
+
+    // Counter reset: newer < older → rate = 0
+    let reset_newer = CounterSnapshot {
+        node_id: "n1".to_string(),
+        collected_at: now,
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 50,
+            byte_count: 5000,
+        }],
+    };
+    let rate = counter_rate::calculate_rate(&older, &reset_newer, "drop_all").unwrap();
+    assert_eq!(rate.matches_per_second, 0.0);
+}
+
+const COUNTER_FSM_YAML: &str = r#"
+name: counter-escalate
+kind: adaptive_policy
+description: Escalate when drop rate exceeds threshold
+initial: monitoring
+states:
+  monitoring:
+    transitions:
+      - to: escalated
+        when:
+          counter: drop_all
+          rate_above: 50.0
+  escalated:
+    action:
+      alert:
+        message: "Counter threshold exceeded"
+    terminal: true
+"#;
+
+/// Counter condition fires transition when rate exceeds threshold.
+#[tokio::test]
+async fn test_counter_condition_fires_transition() {
+    use pacinet_core::{CounterSnapshot, RuleCounter};
+
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let (ctrl_port, counter_cache) = start_controller_with_fsm(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    // Register a node
+    let labels = HashMap::from([("env".to_string(), "prod".to_string())]);
+    let node_id = register_node(&ctrl_addr, "counter-node", "127.0.0.1:19990", labels).await;
+    storage
+        .update_node_state(&node_id, pacinet_core::NodeState::Online)
+        .unwrap();
+
+    let mut mgmt =
+        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+
+    // Create counter FSM definition
+    mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
+        definition_yaml: COUNTER_FSM_YAML.to_string(),
+    })
+    .await
+    .unwrap();
+
+    // Start adaptive policy FSM targeting the node
+    let start_resp = mgmt
+        .start_fsm(StartFsmRequest {
+            definition_name: "counter-escalate".to_string(),
+            rules_yaml: String::new(),
+            options: None,
+            target_label_filter: HashMap::from([("env".to_string(), "prod".to_string())]),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(start_resp.success, "Start failed: {}", start_resp.message);
+    let instance_id = start_resp.instance_id;
+
+    // Inject counter snapshots into cache: high rate (1000 matches in 10s = 100/s)
+    let now = chrono::Utc::now();
+    counter_cache.record(CounterSnapshot {
+        node_id: node_id.clone(),
+        collected_at: now - chrono::Duration::seconds(10),
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 1000,
+            byte_count: 100000,
+        }],
+    });
+    counter_cache.record(CounterSnapshot {
+        node_id: node_id.clone(),
+        collected_at: now,
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 2000,
+            byte_count: 200000,
+        }],
+    });
+
+    // Wait for FSM engine to evaluate (5s interval)
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+
+    // Verify transition to escalated
+    let status_resp = mgmt
+        .get_fsm_instance(GetFsmInstanceRequest {
+            instance_id: instance_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let info = status_resp.instance.unwrap();
+    assert_eq!(
+        info.status, "completed",
+        "Expected completed, got {} (state={})",
+        info.status, info.current_state
+    );
+    assert_eq!(info.current_state, "escalated");
+}
+
+const DURATION_FSM_YAML: &str = r#"
+name: sustained-counter
+kind: adaptive_policy
+description: Escalate only if rate sustained for 3 seconds
+initial: monitoring
+states:
+  monitoring:
+    transitions:
+      - to: escalated
+        when:
+          counter: drop_all
+          rate_above: 50.0
+          for: 3s
+  escalated:
+    terminal: true
+"#;
+
+/// Counter condition with for_duration: verify it waits before firing.
+#[tokio::test]
+async fn test_counter_condition_for_duration() {
+    use pacinet_core::{CounterSnapshot, RuleCounter};
+
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let (ctrl_port, counter_cache) = start_controller_with_fsm(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    let labels = HashMap::from([("env".to_string(), "test".to_string())]);
+    let node_id = register_node(&ctrl_addr, "dur-node", "127.0.0.1:19991", labels).await;
+    storage
+        .update_node_state(&node_id, pacinet_core::NodeState::Online)
+        .unwrap();
+
+    let mut mgmt =
+        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+
+    mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
+        definition_yaml: DURATION_FSM_YAML.to_string(),
+    })
+    .await
+    .unwrap();
+
+    let start_resp = mgmt
+        .start_fsm(StartFsmRequest {
+            definition_name: "sustained-counter".to_string(),
+            rules_yaml: String::new(),
+            options: None,
+            target_label_filter: HashMap::from([("env".to_string(), "test".to_string())]),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(start_resp.success);
+    let instance_id = start_resp.instance_id;
+
+    // Inject high-rate snapshots
+    let now = chrono::Utc::now();
+    counter_cache.record(CounterSnapshot {
+        node_id: node_id.clone(),
+        collected_at: now - chrono::Duration::seconds(10),
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 1000,
+            byte_count: 100000,
+        }],
+    });
+    counter_cache.record(CounterSnapshot {
+        node_id: node_id.clone(),
+        collected_at: now,
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 2000,
+            byte_count: 200000,
+        }],
+    });
+
+    // Wait for first evaluation — should NOT fire yet (for_duration=3s not elapsed)
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+
+    let status_resp = mgmt
+        .get_fsm_instance(GetFsmInstanceRequest {
+            instance_id: instance_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let info = status_resp.instance.unwrap();
+    assert_eq!(
+        info.current_state, "monitoring",
+        "Should still be monitoring (duration not met), got state={}",
+        info.current_state
+    );
+
+    // Keep injecting snapshots to maintain high rate
+    let now2 = chrono::Utc::now();
+    counter_cache.record(CounterSnapshot {
+        node_id: node_id.clone(),
+        collected_at: now2,
+        counters: vec![RuleCounter {
+            rule_name: "drop_all".to_string(),
+            match_count: 3000,
+            byte_count: 300000,
+        }],
+    });
+
+    // Wait for another eval cycle — duration should now be met (3s+ elapsed since first true)
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+
+    let status_resp = mgmt
+        .get_fsm_instance(GetFsmInstanceRequest {
+            instance_id: instance_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let info = status_resp.instance.unwrap();
+    assert_eq!(
+        info.status, "completed",
+        "Expected completed, got {} (state={})",
+        info.status, info.current_state
+    );
+    assert_eq!(info.current_state, "escalated");
 }

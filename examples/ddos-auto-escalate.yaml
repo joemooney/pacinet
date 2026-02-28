@@ -1,0 +1,52 @@
+name: ddos-auto-escalate
+kind: adaptive_policy
+description: Monitor drop rate, auto-escalate if DDoS detected
+initial: monitoring
+states:
+  monitoring:
+    transitions:
+      - to: escalating
+        when:
+          counter: drop_all
+          rate_above: 1000.0
+          for: 30s
+  escalating:
+    action:
+      deploy:
+        select: { label: { env: prod } }
+    transitions:
+      - to: escalated
+        when: { all_succeeded: true }
+      - to: escalation_failed
+        when: { any_failed: true }
+  escalated:
+    action:
+      alert:
+        message: "DDoS mitigation deployed"
+        webhook:
+          url: https://hooks.example.com/alerts
+          bearer_token: secret-token
+          timeout_seconds: 5
+    transitions:
+      - to: de_escalating
+        when:
+          counter: drop_all
+          rate_below: 100.0
+          for: 5m
+      - to: monitoring
+        when: { manual: true }
+  de_escalating:
+    action:
+      rollback: { target: previous }
+    transitions:
+      - to: monitoring
+        when: { all_succeeded: true }
+      - to: escalated
+        when: { any_failed: true }
+  escalation_failed:
+    action:
+      alert:
+        message: "DDoS escalation FAILED"
+        webhook:
+          url: https://hooks.example.com/alerts
+    terminal: true

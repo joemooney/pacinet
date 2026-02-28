@@ -47,13 +47,13 @@ PaciNet follows a classic SDN controller architecture:
 
 ### Key Components
 
-1. **pacinet-server** — The central controller. Receives agent registrations, stores node state (in-memory or SQLite), handles policy deployment, batch deploy, fleet status, policy history, rollback, and forwards deploy requests to agents. Includes stale node reaper, FSM evaluation engine (background loop for YAML-defined deployment state machines), Prometheus metrics endpoint, and gRPC health service. Supports mTLS.
+1. **pacinet-server** — The central controller. Receives agent registrations, stores node state (in-memory or SQLite), handles policy deployment, batch deploy, fleet status, policy history, rollback, and forwards deploy requests to agents. Includes stale node reaper, FSM evaluation engine (background loop for YAML-defined deployment and adaptive policy state machines), counter snapshot cache (in-memory ring buffer for rate tracking), webhook delivery for alert actions, Prometheus metrics endpoint, and gRPC health service. Supports mTLS.
 
 2. **pacinet-agent** — Runs on each PacGate node. Registers with the controller on startup, sends periodic heartbeats with retry/backoff, handles rule deployment by invoking the `pacgate` CLI, auto-detects PacGate version, reports counters and CPU usage. Supports graceful shutdown and mTLS.
 
 3. **pacinet-cli** (`pacinet`) — Operator command-line tool. Connects to the controller to list nodes, deploy policies (single or batch), query counters, view fleet status, diff policies, view policy/deployment history, rollback policies, and manage FSM definitions and instances (create, start, advance, cancel). Supports mTLS.
 
-4. **pacinet-core** — Shared domain model (Node, Policy, PolicyVersion, DeploymentRecord, RuleCounter), error definitions, Storage trait for backend abstraction, TLS configuration helpers, unified policy hash function, and YAML-defined FSM types (FsmDefinition, FsmInstance, FsmContext, conditions, actions).
+4. **pacinet-core** — Shared domain model (Node, Policy, PolicyVersion, DeploymentRecord, RuleCounter, CounterSnapshot), error definitions, Storage trait for backend abstraction, TLS configuration helpers, unified policy hash function, and YAML-defined FSM types (FsmDefinition, FsmInstance, FsmContext, conditions including counter rate conditions, actions including webhook config).
 
 5. **pacinet-proto** — Generated gRPC/protobuf types from `proto/pacinet.proto`.
 
@@ -80,7 +80,7 @@ Development certificates can be generated with `make gen-certs` (requires openss
 
 ## Observability
 
-- **Prometheus metrics**: controller exposes `/metrics` on `--metrics-port` (default 9090) with node gauges, deploy counters/histograms, heartbeat counters, uptime
+- **Prometheus metrics**: controller exposes `/metrics` on `--metrics-port` (default 9090) with node gauges, deploy counters/histograms, heartbeat counters, uptime, FSM transitions, counter snapshots, webhook deliveries
 - **Structured logging**: via tracing with EnvFilter (`RUST_LOG` environment variable)
 - **gRPC health checks**: via tonic-health
 - **Policy audit trail**: every deployment recorded with result and version
@@ -97,21 +97,21 @@ Development certificates can be generated with `make gen-certs` (requires openss
 - **tonic-health** for gRPC health checks
 - **tonic-web** for gRPC-Web support
 - **similar** for policy diff
+- **reqwest** (rustls-tls) for webhook HTTP delivery
 
 ## Current Status
 
-**Phase 5 complete** — YAML-defined FSM engine for deployment orchestration:
-- **FSM definitions**: YAML-parsed deployment state machines (canary, staged, rollback strategies)
-- **FSM engine**: background evaluation loop (5s interval) with condition-driven, timer, and manual transitions
-- **FSM actions**: deploy (with node selector, batch percent, compile options), rollback, alert (log-only)
-- **9 FSM RPCs**: CRUD for definitions + start/get/list/advance/cancel for instances
-- **CLI `fsm` subcommand**: create, list, show, delete definitions; start, status, instances, advance, cancel
-- **Shared deploy module**: refactored deploy logic reused by both ManagementService and FsmEngine
-- **FSM storage**: JSON blob storage in both MemoryStorage and SqliteStorage
-- **FSM metrics**: transition counter, instance status counter, running instances gauge
-- 68 tests (27 core, 18 server storage, 10 agent, 13 integration) all passing, clippy clean
+**Phase 5b complete** — Counter rate tracking & adaptive policy FSMs:
+- **Counter snapshot cache**: in-memory ring buffer per node with configurable retention and max snapshots
+- **Counter rate calculation**: rate from snapshot pairs, counter reset handling, multi-node aggregation (any/all/sum)
+- **Counter condition evaluation**: rate_above/rate_below/total_above thresholds with `for_duration` sustained tracking
+- **Adaptive policy FSMs**: `kind: adaptive_policy` with label-based node selection and counter-driven transitions
+- **Webhook delivery**: alert actions send JSON payloads via HTTP with bearer/basic auth, exponential backoff retry
+- **Example**: `examples/ddos-auto-escalate.yaml` — monitoring → escalating → escalated → de-escalating cycle
+- 89 tests (32 core, 30 server unit, 10 agent, 17 integration) all passing, clippy clean
 
 Previous phases:
+- Phase 5: YAML-defined FSM engine for deployment orchestration
 - Phase 4: mTLS security, Prometheus metrics, policy rollback, CI pipeline
 - Phase 3: Production resilience, persistence, fleet management, observability
 - Phase 2: End-to-end deployment flow and integration tests

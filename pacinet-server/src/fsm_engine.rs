@@ -1,9 +1,12 @@
 //! FSM evaluation engine — runs as background task evaluating FSM instances.
 
 use crate::config::ControllerConfig;
+use crate::counter_cache::CounterSnapshotCache;
+use crate::counter_rate::{self, AggregateMode};
 use crate::deploy;
 use crate::metrics as m;
 use crate::storage::blocking;
+use crate::webhook;
 use pacinet_core::fsm::*;
 use pacinet_core::Storage;
 use pacinet_proto::CompileOptions;
@@ -15,6 +18,7 @@ pub struct FsmEngine {
     storage: Arc<dyn Storage>,
     config: ControllerConfig,
     tls_config: Option<pacinet_core::tls::TlsConfig>,
+    counter_cache: Arc<CounterSnapshotCache>,
 }
 
 impl FsmEngine {
@@ -22,11 +26,13 @@ impl FsmEngine {
         storage: Arc<dyn Storage>,
         config: ControllerConfig,
         tls_config: Option<pacinet_core::tls::TlsConfig>,
+        counter_cache: Arc<CounterSnapshotCache>,
     ) -> Self {
         Self {
             storage,
             config,
             tls_config,
+            counter_cache,
         }
     }
 
@@ -138,6 +144,67 @@ impl FsmEngine {
             instance_id = %instance.instance_id,
             definition = %def_name,
             "FSM instance started"
+        );
+
+        Ok(instance)
+    }
+
+    /// Start an adaptive policy FSM instance with target nodes selected by label.
+    pub async fn start_adaptive_instance(
+        &self,
+        def_name: &str,
+        rules_yaml: Option<String>,
+        compile_options: Option<FsmCompileOptions>,
+        target_label_filter: &std::collections::HashMap<String, String>,
+    ) -> Result<FsmInstance, pacinet_core::PaciNetError> {
+        let name = def_name.to_string();
+        let definition = blocking(&self.storage, move |s| s.get_fsm_definition(&name))
+            .await
+            .map_err(|e| pacinet_core::PaciNetError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                pacinet_core::PaciNetError::Fsm(FsmError::DefinitionNotFound(
+                    def_name.to_string(),
+                ))
+            })?;
+
+        // Select target nodes by label
+        let label_filter = target_label_filter.clone();
+        let nodes = blocking(&self.storage, move |s| s.list_nodes(&label_filter))
+            .await
+            .map_err(|e| pacinet_core::PaciNetError::Internal(e.to_string()))?;
+
+        let target_node_ids: Vec<String> = nodes.iter().map(|n| n.node_id.clone()).collect();
+        if target_node_ids.is_empty() {
+            return Err(pacinet_core::PaciNetError::Internal(
+                "No nodes match the target label filter".to_string(),
+            ));
+        }
+
+        let mut context = FsmContext::for_adaptive_policy(target_node_ids);
+        context.rules_yaml = rules_yaml;
+        context.compile_options = compile_options;
+
+        let mut instance =
+            FsmInstance::new(def_name.to_string(), definition.initial.clone(), context);
+
+        // Execute initial state's action if any
+        if let Some(state_def) = definition.states.get(&definition.initial) {
+            if let Some(ref action) = state_def.action {
+                self.execute_action(action, &mut instance).await;
+            }
+        }
+
+        let inst_clone = instance.clone();
+        blocking(&self.storage, move |s| s.store_fsm_instance(inst_clone))
+            .await
+            .map_err(|e| pacinet_core::PaciNetError::Internal(e.to_string()))?;
+
+        m::record_fsm_instance_status("started");
+        info!(
+            instance_id = %instance.instance_id,
+            definition = %def_name,
+            target_nodes = instance.context.target_nodes.len(),
+            "Adaptive policy FSM instance started"
         );
 
         Ok(instance)
@@ -305,9 +372,10 @@ impl FsmEngine {
         }
 
         // Evaluate transitions in order
-        for transition in &current_state_def.transitions {
+        let current_state = instance.current_state.clone();
+        for (ti, transition) in current_state_def.transitions.iter().enumerate() {
             let should_fire = if let Some(ref condition) = transition.when {
-                self.evaluate_condition(condition, &instance)
+                self.evaluate_condition(condition, &mut instance, &current_state, ti)
             } else if let Some(ref after) = transition.after {
                 // Timer transition
                 if let Ok(duration) = parse_duration(after) {
@@ -339,13 +407,19 @@ impl FsmEngine {
             }
         }
 
+        // If context was modified (e.g., counter_condition_first_true updated), persist
+        let inst_clone = instance.clone();
+        let _ = blocking(&self.storage, move |s| s.update_fsm_instance(inst_clone)).await;
+
         Ok(())
     }
 
     fn evaluate_condition(
         &self,
         condition: &ConditionDefinition,
-        instance: &FsmInstance,
+        instance: &mut FsmInstance,
+        current_state: &str,
+        transition_idx: usize,
     ) -> bool {
         match condition {
             ConditionDefinition::Simple(simple) => {
@@ -364,25 +438,227 @@ impl FsmEngine {
                 // manual: true — only triggered by advance_instance, not by evaluation
                 false
             }
-            ConditionDefinition::Counter(_) => {
-                // Deferred to Phase 5b
-                false
+            ConditionDefinition::Counter(cc) => {
+                self.evaluate_counter_condition(cc, instance, current_state, transition_idx)
             }
             ConditionDefinition::Compound(compound) => {
                 if let Some(ref conditions) = compound.and {
                     return conditions
                         .iter()
-                        .all(|c: &ConditionDefinition| self.evaluate_condition(c, instance));
+                        .all(|c: &ConditionDefinition| {
+                            self.evaluate_condition(c, instance, current_state, transition_idx)
+                        });
                 }
                 if let Some(ref conditions) = compound.or {
                     return conditions
                         .iter()
-                        .any(|c: &ConditionDefinition| self.evaluate_condition(c, instance));
+                        .any(|c: &ConditionDefinition| {
+                            self.evaluate_condition(c, instance, current_state, transition_idx)
+                        });
                 }
                 if let Some(ref inner) = compound.not {
-                    return !self.evaluate_condition(inner, instance);
+                    return !self.evaluate_condition(
+                        inner,
+                        instance,
+                        current_state,
+                        transition_idx,
+                    );
                 }
                 false
+            }
+        }
+    }
+
+    /// Evaluate a counter condition against cached snapshots.
+    fn evaluate_counter_condition(
+        &self,
+        cc: &CounterCondition,
+        instance: &mut FsmInstance,
+        current_state: &str,
+        transition_idx: usize,
+    ) -> bool {
+        let condition_key = format!("{}:{}", current_state, transition_idx);
+        let aggregate_mode = cc
+            .aggregate
+            .as_deref()
+            .map(counter_rate::parse_aggregate_mode)
+            .unwrap_or(AggregateMode::Any);
+        let use_bytes = cc.field.as_deref() == Some("bytes");
+
+        // Determine which nodes to check
+        let nodes_to_check: Vec<String> = if instance.context.target_nodes.is_empty() {
+            // Fall back to deployed nodes or all cached nodes
+            if instance.context.deployed_nodes.is_empty() {
+                self.counter_cache.node_ids()
+            } else {
+                instance.context.deployed_nodes.clone()
+            }
+        } else {
+            instance.context.target_nodes.clone()
+        };
+
+        if nodes_to_check.is_empty() {
+            m::record_counter_eval("no_nodes");
+            return false;
+        }
+
+        // Check total_above (absolute value check)
+        if let Some(threshold) = cc.total_above {
+            let met = self.check_total_above(
+                &cc.counter,
+                threshold,
+                use_bytes,
+                &nodes_to_check,
+                aggregate_mode,
+            );
+            if !met {
+                instance
+                    .context
+                    .counter_condition_first_true
+                    .remove(&condition_key);
+                m::record_counter_eval("total_not_met");
+                return false;
+            }
+        }
+
+        // Check rate thresholds
+        if cc.rate_above.is_some() || cc.rate_below.is_some() {
+            let met = self.check_rate_threshold(
+                &cc.counter,
+                cc.rate_above,
+                cc.rate_below,
+                use_bytes,
+                &nodes_to_check,
+                aggregate_mode,
+            );
+            if !met {
+                instance
+                    .context
+                    .counter_condition_first_true
+                    .remove(&condition_key);
+                m::record_counter_eval("rate_not_met");
+                return false;
+            }
+        }
+
+        // If we reach here, the threshold condition is met.
+        // Now check for_duration if specified.
+        if let Some(ref dur_str) = cc.for_duration {
+            let required_duration = match parse_duration(dur_str) {
+                Ok(d) => d,
+                Err(_) => return false,
+            };
+
+            let now = chrono::Utc::now();
+            let first_true = instance
+                .context
+                .counter_condition_first_true
+                .entry(condition_key.clone())
+                .or_insert(now);
+
+            let elapsed = now - *first_true;
+            let required = chrono::Duration::from_std(required_duration)
+                .unwrap_or(chrono::Duration::MAX);
+
+            if elapsed < required {
+                debug!(
+                    instance_id = %instance.instance_id,
+                    condition = %condition_key,
+                    elapsed_secs = elapsed.num_seconds(),
+                    required_secs = required.num_seconds(),
+                    "Counter condition sustained, waiting for duration"
+                );
+                m::record_counter_eval("duration_waiting");
+                return false;
+            }
+
+            m::record_counter_eval("duration_met");
+        } else {
+            m::record_counter_eval("met");
+        }
+
+        true
+    }
+
+    /// Check if total counter value exceeds threshold.
+    fn check_total_above(
+        &self,
+        rule_name: &str,
+        threshold: u64,
+        use_bytes: bool,
+        nodes: &[String],
+        aggregate: AggregateMode,
+    ) -> bool {
+        match aggregate {
+            AggregateMode::Any => nodes.iter().any(|nid| {
+                self.counter_cache
+                    .latest(nid)
+                    .and_then(|s| counter_rate::get_counter_total(&s, rule_name))
+                    .map(|(m, b)| {
+                        let val = if use_bytes { b } else { m };
+                        val > threshold
+                    })
+                    .unwrap_or(false)
+            }),
+            AggregateMode::All => nodes.iter().all(|nid| {
+                self.counter_cache
+                    .latest(nid)
+                    .and_then(|s| counter_rate::get_counter_total(&s, rule_name))
+                    .map(|(m, b)| {
+                        let val = if use_bytes { b } else { m };
+                        val > threshold
+                    })
+                    .unwrap_or(false)
+            }),
+            AggregateMode::Sum => {
+                let total: u64 = nodes
+                    .iter()
+                    .filter_map(|nid| {
+                        self.counter_cache
+                            .latest(nid)
+                            .and_then(|s| counter_rate::get_counter_total(&s, rule_name))
+                            .map(|(m, b)| if use_bytes { b } else { m })
+                    })
+                    .sum();
+                total > threshold
+            }
+        }
+    }
+
+    /// Check if rate meets the threshold conditions.
+    fn check_rate_threshold(
+        &self,
+        rule_name: &str,
+        rate_above: Option<f64>,
+        rate_below: Option<f64>,
+        use_bytes: bool,
+        nodes: &[String],
+        aggregate: AggregateMode,
+    ) -> bool {
+        // Collect per-node rates
+        let rates: Vec<f64> = nodes
+            .iter()
+            .filter_map(|nid| {
+                let (older, newer) = self.counter_cache.latest_pair(nid)?;
+                let rate = counter_rate::calculate_rate(&older, &newer, rule_name)?;
+                Some(if use_bytes {
+                    rate.bytes_per_second
+                } else {
+                    rate.matches_per_second
+                })
+            })
+            .collect();
+
+        if rates.is_empty() {
+            return false;
+        }
+
+        match aggregate {
+            AggregateMode::Any => rates.iter().any(|r| rate_matches(*r, rate_above, rate_below)),
+            AggregateMode::All => rates.iter().all(|r| rate_matches(*r, rate_above, rate_below)),
+            AggregateMode::Sum => {
+                let sum: f64 = rates.iter().sum();
+                rate_matches(sum, rate_above, rate_below)
             }
         }
     }
@@ -404,6 +680,13 @@ impl FsmEngine {
             to = %to_state,
             "FSM transition"
         );
+
+        // Clear counter_condition_first_true entries for the old state
+        let old_state = instance.current_state.clone();
+        instance
+            .context
+            .counter_condition_first_true
+            .retain(|k, _| !k.starts_with(&format!("{}:", old_state)));
 
         instance.transition(to_state.to_string(), trigger, message);
 
@@ -643,7 +926,39 @@ impl FsmEngine {
             instance_id = %instance.instance_id,
             channel = ?alert_action.channel,
             message = %alert_action.message,
-            "FSM alert (log-only)"
+            "FSM alert"
         );
+
+        // Deliver webhook if configured
+        if let Some(ref wh_config) = alert_action.webhook {
+            let payload = webhook::WebhookPayload {
+                event: "fsm_alert".to_string(),
+                instance_id: instance.instance_id.clone(),
+                definition_name: instance.definition_name.clone(),
+                current_state: instance.current_state.clone(),
+                message: alert_action.message.clone(),
+                timestamp: chrono::Utc::now(),
+                deployed_nodes: instance.context.deployed_nodes.clone(),
+            };
+            let config = wh_config.clone();
+            tokio::spawn(async move {
+                webhook::deliver_webhook(&config, &payload).await;
+            });
+        }
     }
+}
+
+/// Check if a rate value matches the given threshold conditions.
+fn rate_matches(rate: f64, above: Option<f64>, below: Option<f64>) -> bool {
+    if let Some(threshold) = above {
+        if rate <= threshold {
+            return false;
+        }
+    }
+    if let Some(threshold) = below {
+        if rate >= threshold {
+            return false;
+        }
+    }
+    true
 }

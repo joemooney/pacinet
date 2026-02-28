@@ -3,9 +3,9 @@ pub mod error;
 pub mod instance;
 
 pub use definition::{
-    ActionDefinition, AlertAction, CompileOptions as FsmCompileOptions, ConditionDefinition,
-    DeployAction, FsmDefinition, FsmKind, NodeSelector, RollbackAction, SimpleCondition,
-    StateDefinition, TransitionDefinition,
+    ActionDefinition, AlertAction, BasicAuth, CompileOptions as FsmCompileOptions,
+    ConditionDefinition, CounterCondition, DeployAction, FsmDefinition, FsmKind, NodeSelector,
+    RollbackAction, SimpleCondition, StateDefinition, TransitionDefinition, WebhookConfig,
 };
 pub use error::FsmError;
 pub use instance::{

@@ -62,19 +62,19 @@
 ### 3.1 FSM Definitions
 - YAML-defined finite state machines for deployment strategies (canary, staged rollout, etc.)
 - Parsed via serde_yaml with FsmDefinition, StateDefinition, TransitionDefinition types
-- Validation: initial state exists, all transition targets exist, terminal states have no transitions, durations parse
-- Kinds: Deployment (supported), AdaptivePolicy (designed, deferred to Phase 5b)
+- Validation: initial state exists, all transition targets exist, terminal states have no transitions, durations parse, counter conditions validated
+- Kinds: Deployment (deploy orchestration), AdaptivePolicy (counter-rate-driven automation)
 
 ### 3.2 FSM States and Transitions
 - States have optional actions (deploy, rollback, alert) and transitions
 - Terminal states have no transitions and mark instance as Completed
-- Transition conditions: Simple (all_succeeded, any_failed, manual), Counter (deferred), Compound (and/or/not)
+- Transition conditions: Simple (all_succeeded, any_failed, manual), Counter (rate_above/rate_below/total_above with for_duration), Compound (and/or/not)
 - Timer transitions: `after: 5m` / `30s` / `1h` duration syntax
 
 ### 3.3 FSM Actions
 - Deploy: select nodes by label filter, optional limit, optional batch_percent, compile options
 - Rollback: target previous policy version, redeploys via shared deploy module
-- Alert: log-only (webhook delivery deferred to Phase 5b)
+- Alert: log message + optional webhook delivery (HTTP POST with JSON payload, bearer/basic auth, retry with backoff)
 
 ### 3.4 FSM Engine
 - Background evaluation loop running every 5 seconds
@@ -84,8 +84,9 @@
 
 ### 3.5 FSM Instance Lifecycle
 - Created from a definition with rules_yaml and compile options
+- Adaptive policy instances created with target node label filter (no rules_yaml required)
 - Status: Running → Completed / Failed / Cancelled
-- Context tracks: target nodes, deployed nodes, failed nodes, batch cursor, last action result
+- Context tracks: target nodes, deployed nodes, failed nodes, batch cursor, last action result, counter_condition_first_true timestamps
 - History records all transitions with timestamp, trigger type, and message
 
 ### 3.6 FSM gRPC RPCs
@@ -95,6 +96,32 @@
 ### 3.7 FSM Storage
 - Stored as JSON blobs in both MemoryStorage and SqliteStorage
 - Tables: fsm_definitions (name PK), fsm_instances (instance_id PK, indexed by status and definition_name)
+
+### 3.8 Counter Rate Tracking
+- In-memory ring buffer (`CounterSnapshotCache`) stores timestamped counter snapshots per node
+- Snapshots recorded on each `ReportCounters` RPC (not persisted to SQLite — intentionally separate)
+- Configurable retention period (default 1 hour) and max snapshots per node (default 120)
+- Rate calculation from consecutive snapshot pairs: `(newer - older) / time_delta`
+- Counter reset handling: if newer < older, rate = 0 (conservative)
+- Expired snapshots evicted by the stale node reaper loop
+
+### 3.9 Counter Conditions
+- `rate_above` / `rate_below`: threshold on matches_per_second (or bytes_per_second via `field: bytes`)
+- `total_above`: threshold on absolute counter value
+- `for_duration`: sustained threshold tracking — condition must remain true for specified duration before firing
+- `aggregate`: multi-node aggregation mode — `any` (default, fire if any node exceeds), `all`, `sum`
+- Counter condition first-true timestamps stored in `FsmContext::counter_condition_first_true` HashMap
+- Timestamps cleared on state transitions to reset sustained tracking
+
+### 3.10 Webhook Delivery
+- Alert actions can include webhook configuration in the YAML FSM definition
+- HTTP POST with JSON payload containing: event type, instance ID, definition name, current state, message, timestamp, deployed nodes
+- Authentication: bearer token or basic auth (username/password)
+- Custom headers support
+- Configurable timeout (default 10 seconds)
+- Retry with exponential backoff (default max 2 retries, 1s/2s/4s delays)
+- Fire-and-forget via `tokio::spawn` — does not block FSM evaluation
+- Metrics recorded for webhook delivery success/failure
 
 ## 4. Counter Collection
 
@@ -136,7 +163,7 @@
 - `pacinet fsm list [--kind deployment]` — list definitions
 - `pacinet fsm show <name>` — show definition YAML
 - `pacinet fsm delete <name>` — delete definition
-- `pacinet fsm start <name> --rules <file> [--counters]` — start FSM instance
+- `pacinet fsm start <name> [--rules <file>] [--counters] [--label key=val]` — start FSM instance (--rules for deployment FSMs, --label for adaptive policy FSMs)
 - `pacinet fsm status <instance-id>` — show instance status with transition history
 - `pacinet fsm instances [--definition X] [--status running]` — list instances
 - `pacinet fsm advance <instance-id> [--state X]` — manually advance instance
@@ -211,6 +238,10 @@
   - `pacinet_fsm_transitions_total` (counter) — FSM state transitions
   - `pacinet_fsm_instances{status}` (counter) — FSM instance lifecycle events
   - `pacinet_fsm_running_instances` (gauge) — currently running FSM instances
+  - `pacinet_counter_snapshots_total` (counter) — counter snapshots recorded
+  - `pacinet_counter_snapshots_cached` (gauge) — snapshots currently in cache
+  - `pacinet_webhook_deliveries_total{result}` (counter) — webhook delivery attempts
+  - `pacinet_counter_evals_total{result}` (counter) — counter condition evaluations
 
 ### 9.2 Structured Logging
 - via tracing with EnvFilter
@@ -232,6 +263,8 @@
 - `--heartbeat-miss-threshold` (default 3)
 - `--heartbeat-interval` on agent (default 30s)
 - `--metrics-port` (default 9090, 0 to disable)
+- `--counter-retention-secs` (default 3600) — counter snapshot cache retention
+- `--counter-max-per-node` (default 120) — max cached snapshots per node
 - `RUST_LOG` environment variable for log filtering
 
 ### 10.3 Error Handling
@@ -264,6 +297,10 @@
   - FSM cancel running instance
   - FSM list instances with filters
   - FSM deploy failure triggers transition: unreachable agent → any_failed → terminal
+  - Counter snapshot cache: record, query, eviction
+  - Counter rate calculation: rate from snapshots, counter reset handling
+  - Counter condition fires transition: inject snapshots → rate_above threshold met → state transition
+  - Counter condition for_duration: verify sustained threshold tracking
 - PacGateBackend enum (Real | Mock) for test isolation
 
 ### 10.6 CI/CD

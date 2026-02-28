@@ -1,9 +1,10 @@
 use crate::config::ControllerConfig;
+use crate::counter_cache::CounterSnapshotCache;
 use crate::fsm_engine::FsmEngine;
 use crate::metrics as m;
 use crate::storage::blocking;
 use pacinet_core::model::{Node, Policy};
-use pacinet_core::Storage;
+use pacinet_core::{CounterSnapshot, Storage};
 use pacinet_proto::*;
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -16,11 +17,20 @@ use tracing::{info, warn};
 
 pub struct ControllerService {
     storage: Arc<dyn Storage>,
+    counter_cache: Option<Arc<CounterSnapshotCache>>,
 }
 
 impl ControllerService {
     pub fn new(storage: Arc<dyn Storage>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            counter_cache: None,
+        }
+    }
+
+    pub fn with_counter_cache(mut self, cache: Arc<CounterSnapshotCache>) -> Self {
+        self.counter_cache = Some(cache);
+        self
     }
 }
 
@@ -91,6 +101,23 @@ impl paci_net_controller_server::PaciNetController for ControllerService {
         let node_id = req.node_id.clone();
         let counters: Vec<pacinet_core::RuleCounter> =
             req.counters.into_iter().map(|c| c.into()).collect();
+
+        // Record snapshot in counter cache for rate tracking
+        if let Some(ref cache) = self.counter_cache {
+            let collected_at = req
+                .collected_at
+                .as_ref()
+                .and_then(|t| chrono::DateTime::from_timestamp(t.seconds, 0))
+                .unwrap_or_else(chrono::Utc::now);
+
+            let snapshot = CounterSnapshot {
+                node_id: node_id.clone(),
+                collected_at,
+                counters: counters.clone(),
+            };
+            cache.record(snapshot);
+            m::record_counter_snapshot();
+        }
 
         blocking(&self.storage, move |s| s.store_counters(&node_id, counters)).await?;
 
@@ -715,10 +742,28 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
             conntrack: o.conntrack,
         });
 
-        match engine
-            .start_instance(&req.definition_name, req.rules_yaml, compile_opts)
-            .await
-        {
+        // If target_label_filter is provided, start as adaptive policy FSM
+        let result = if !req.target_label_filter.is_empty() {
+            let rules = if req.rules_yaml.is_empty() {
+                None
+            } else {
+                Some(req.rules_yaml)
+            };
+            engine
+                .start_adaptive_instance(
+                    &req.definition_name,
+                    rules,
+                    compile_opts,
+                    &req.target_label_filter,
+                )
+                .await
+        } else {
+            engine
+                .start_instance(&req.definition_name, req.rules_yaml, compile_opts)
+                .await
+        };
+
+        match result {
             Ok(instance) => Ok(Response::new(StartFsmResponse {
                 success: true,
                 instance_id: instance.instance_id,

@@ -409,6 +409,7 @@ message StartFsmRequest {
   string definition_name = 1;
   string rules_yaml = 2;
   CompileOptions options = 3;
+  map<string, string> target_label_filter = 4;  // For adaptive policy node selection
 }
 
 message StartFsmResponse {

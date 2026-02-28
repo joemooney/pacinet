@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use super::definition::CompileOptions;
 
@@ -70,6 +71,9 @@ pub struct FsmContext {
     pub last_action_result: Option<ActionResult>,
     #[serde(default)]
     pub batch_cursor: u32,
+    /// Tracks when a counter condition first became true (key: "state:transition_idx").
+    #[serde(default)]
+    pub counter_condition_first_true: HashMap<String, DateTime<Utc>>,
 }
 
 /// Result of an action execution.
@@ -184,6 +188,22 @@ impl FsmContext {
             failed_nodes: Vec::new(),
             last_action_result: None,
             batch_cursor: 0,
+            counter_condition_first_true: HashMap::new(),
+        }
+    }
+
+    /// Create a new context for an adaptive policy FSM.
+    pub fn for_adaptive_policy(target_nodes: Vec<String>) -> Self {
+        Self {
+            rules_yaml: None,
+            policy_hash: None,
+            compile_options: None,
+            target_nodes,
+            deployed_nodes: Vec::new(),
+            failed_nodes: Vec::new(),
+            last_action_result: None,
+            batch_cursor: 0,
+            counter_condition_first_true: HashMap::new(),
         }
     }
 }

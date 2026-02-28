@@ -204,6 +204,14 @@ pub struct RuleCounter {
     pub byte_count: u64,
 }
 
+/// Timestamped snapshot of counters from a node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CounterSnapshot {
+    pub node_id: String,
+    pub collected_at: DateTime<Utc>,
+    pub counters: Vec<RuleCounter>,
+}
+
 impl From<pacinet_proto::RuleCounter> for RuleCounter {
     fn from(proto: pacinet_proto::RuleCounter) -> Self {
         Self {

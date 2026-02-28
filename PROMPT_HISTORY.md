@@ -359,3 +359,89 @@ Implement Phase 5: YAML-defined FSM engine for deployment orchestration. Add a g
 ### Git Operations
 - Committed Phase 5 changes
 - Pushed to GitHub
+
+## Session 6 — Counter Rate Tracking & Adaptive Policy FSMs (Phase 5b) (2026-02-27)
+
+### Prompt
+Implement Phase 5b: Counter rate tracking (timestamped counter snapshots with rate calculation), adaptive policy FSMs (counter conditions that fire when rates exceed thresholds), and webhook delivery (AlertAction sends HTTP webhooks).
+
+### Actions Taken
+
+#### 1. Core Types (pacinet-core)
+- **model.rs**: Added `CounterSnapshot` struct (node_id, collected_at, counters Vec)
+- **fsm/definition.rs**: Extended `CounterCondition` with `aggregate: Option<String>` and `field: Option<String>`. Added `WebhookConfig` struct (url, method, bearer_token, basic_auth, timeout_seconds, max_retries, headers). Added `BasicAuth` struct. Extended `AlertAction` with `webhook: Option<WebhookConfig>`. Added counter condition validation in `validate()`. Reordered `ConditionDefinition` enum to Counter, Simple, Compound for correct `serde(untagged)` deserialization. 5 new unit tests.
+- **fsm/instance.rs**: Extended `FsmContext` with `counter_condition_first_true: HashMap<String, DateTime<Utc>>`. Added `FsmContext::for_adaptive_policy(target_nodes)` constructor.
+- **fsm/mod.rs**: Added exports for `BasicAuth`, `CounterCondition`, `WebhookConfig`
+- **lib.rs**: Added `CounterSnapshot` to re-exports
+
+#### 2. Counter Cache (pacinet-server/src/counter_cache.rs) — NEW
+- In-memory ring buffer `CounterSnapshotCache` using `RwLock<HashMap<String, VecDeque<CounterSnapshot>>>`
+- Methods: `record()`, `latest_pair()`, `latest()`, `snapshots_in_window()`, `remove_node()`, `evict_expired()`, `node_ids()`, `total_snapshots()`
+- Configurable retention period and max snapshots per node
+- 6 unit tests
+
+#### 3. Counter Rate Calculation (pacinet-server/src/counter_rate.rs) — NEW
+- `CounterRate` struct, `AggregateMode` enum (Any/All/Sum)
+- `calculate_rate()`: rate from two snapshots with counter reset handling (newer < older → rate = 0)
+- `get_counter_total()`: absolute value lookup
+- `parse_aggregate_mode()`: string parsing with Any default
+- 6 unit tests
+
+#### 4. Webhook Delivery (pacinet-server/src/webhook.rs) — NEW
+- `WebhookPayload` struct (Serialize) with event, instance_id, definition_name, current_state, message, timestamp, deployed_nodes
+- `deliver_webhook()`: async HTTP POST with reqwest, bearer/basic auth, custom headers, exponential backoff retry (max 2)
+- Fire-and-forget via `tokio::spawn` in FSM engine
+
+#### 5. Server Infrastructure
+- **lib.rs**: Added `pub mod counter_cache;`, `counter_rate;`, `webhook;`
+- **config.rs**: Added `counter_snapshot_retention: Duration` (default 1h) and `counter_snapshot_max_per_node: usize` (default 120)
+- **metrics.rs**: Added `record_counter_snapshot()`, `update_counter_snapshot_gauge()`, `record_webhook_delivery()`, `record_counter_eval()`
+- **Cargo.toml** (workspace + server): Added `reqwest = { version = "0.12", features = ["json", "rustls-tls"] }`
+
+#### 6. ControllerService Updates (service.rs)
+- Added `counter_cache: Option<Arc<CounterSnapshotCache>>` field with `with_counter_cache()` builder
+- `report_counters()` now records snapshot in cache after `store_counters()`
+- `start_fsm()` routes to `start_adaptive_instance()` when `target_label_filter` is non-empty
+
+#### 7. Server Main (main.rs)
+- Added CLI args: `--counter-retention-secs` (default 3600), `--counter-max-per-node` (default 120)
+- Creates `Arc<CounterSnapshotCache>`, passes to FsmEngine and ControllerService
+- Reaper loop calls `evict_expired()` and updates snapshot gauge metric
+
+#### 8. FSM Engine Rewrite (fsm_engine.rs)
+- Added `counter_cache: Arc<CounterSnapshotCache>` field
+- `evaluate_counter_condition()`: checks rate/total thresholds per node, applies aggregate modes (Any/All/Sum), manages `for_duration` tracking via `counter_condition_first_true` HashMap
+- `start_adaptive_instance()`: selects nodes by label, creates `FsmContext::for_adaptive_policy()`
+- `execute_alert()`: spawns webhook delivery if webhook config present
+- `fire_transition()`: clears `counter_condition_first_true` entries for old state on transitions
+- `evaluate_instance()`: persists instance at end for counter_condition_first_true updates
+
+#### 9. Proto + CLI Updates
+- **proto/pacinet.proto**: Added `map<string, string> target_label_filter = 4` to `StartFsmRequest`
+- **pacinet-cli/src/main.rs**: `fsm start` now has optional `--rules` and `--label key=val` args; builds `target_label_filter` HashMap
+
+#### 10. Integration Tests (pacinet-server/tests/integration.rs)
+- Updated `start_controller_with_fsm()` to create and return CounterSnapshotCache
+- All existing StartFsmRequest constructors updated with `target_label_filter: HashMap::new()`
+- 4 new tests: `test_counter_snapshot_cache_basic`, `test_counter_rate_calculation`, `test_counter_condition_fires_transition`, `test_counter_condition_for_duration`
+
+#### 11. Example YAML
+- `examples/ddos-auto-escalate.yaml`: adaptive policy FSM with monitoring → escalating → escalated → de_escalating cycle, webhook alerts
+
+### Errors Encountered & Fixed
+- **serde(untagged) enum ordering**: `SimpleCondition` (all optional fields) matched any map before `CounterCondition` could try. Fixed by reordering enum to Counter, Simple, Compound.
+- **CompoundCondition matching before SimpleCondition**: When ordered Counter, Compound, Simple — `{all_succeeded: true}` deserialized as empty Compound. Fixed by putting Simple before Compound.
+- **Missing `DateTime` import in counter_cache test module**: Added `use chrono::DateTime;` in test mod after removing from main imports.
+- **Missing `target_label_filter` field in integration tests**: 6 existing StartFsmRequest constructors needed `target_label_filter: HashMap::new()` after proto change.
+
+### Test Results
+- 89 tests total, all passing:
+  - 32 core tests (7 model/hash + 23 FSM definition/instance/parse_duration + 2 hash)
+  - 30 server unit tests (18 storage + 6 counter_cache + 6 counter_rate)
+  - 10 agent tests (5 pacgate + 5 service)
+  - 17 integration tests (13 existing + 4 new counter/FSM)
+- cargo clippy --workspace -- -D warnings: clean
+
+### Git Operations
+- Committed Phase 5b changes
+- Pushed to GitHub

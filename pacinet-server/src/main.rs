@@ -50,6 +50,14 @@ struct Args {
     #[arg(long, default_value = "9090")]
     metrics_port: u16,
 
+    /// Counter snapshot retention in seconds (default: 3600 = 1h)
+    #[arg(long, default_value = "3600")]
+    counter_retention_secs: u64,
+
+    /// Max counter snapshots per node (default: 120)
+    #[arg(long, default_value = "120")]
+    counter_max_per_node: usize,
+
     /// CA certificate for mTLS
     #[arg(long)]
     ca_cert: Option<String>,
@@ -77,6 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         heartbeat_expect_interval: std::time::Duration::from_secs(args.heartbeat_expect_interval),
         heartbeat_miss_threshold: args.heartbeat_miss_threshold,
         start_time: tokio::time::Instant::now(),
+        counter_snapshot_retention: std::time::Duration::from_secs(args.counter_retention_secs),
+        counter_snapshot_max_per_node: args.counter_max_per_node,
     };
 
     // Create storage backend
@@ -118,14 +128,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     info!("PaciNet controller starting on {}", addr);
 
+    // Create counter snapshot cache
+    let counter_cache = Arc::new(pacinet_server::counter_cache::CounterSnapshotCache::new(
+        chrono::Duration::seconds(config.counter_snapshot_retention.as_secs() as i64),
+        config.counter_snapshot_max_per_node,
+    ));
+    info!(
+        retention_secs = config.counter_snapshot_retention.as_secs(),
+        max_per_node = config.counter_snapshot_max_per_node,
+        "Counter snapshot cache initialized"
+    );
+
     // Create FSM engine
     let fsm_engine = Arc::new(pacinet_server::fsm_engine::FsmEngine::new(
         storage.clone(),
         config.clone(),
         tls_config.clone(),
+        counter_cache.clone(),
     ));
 
-    let controller_service = service::ControllerService::new(storage.clone());
+    let controller_service = service::ControllerService::new(storage.clone())
+        .with_counter_cache(counter_cache.clone());
     let management_service = service::ManagementService::new(storage.clone(), config.clone())
         .with_tls(tls_config.clone())
         .with_fsm_engine(fsm_engine.clone());
@@ -142,6 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reaper_interval = config.heartbeat_expect_interval;
     let stale_threshold = config.stale_threshold();
     let reaper_start = config.start_time;
+    let reaper_cache = counter_cache.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(reaper_interval);
         loop {
@@ -149,6 +173,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Update uptime metric
             pacinet_server::metrics::record_uptime(reaper_start.elapsed().as_secs_f64());
+
+            // Evict expired counter snapshots + update gauge
+            reaper_cache.evict_expired();
+            pacinet_server::metrics::update_counter_snapshot_gauge(
+                reaper_cache.total_snapshots(),
+            );
 
             // Update node gauge metrics
             let storage_summary = reaper_storage.clone();

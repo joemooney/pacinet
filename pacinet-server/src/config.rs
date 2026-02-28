@@ -8,6 +8,8 @@ pub struct ControllerConfig {
     pub heartbeat_expect_interval: Duration,
     pub heartbeat_miss_threshold: u32,
     pub start_time: Instant,
+    pub counter_snapshot_retention: Duration,
+    pub counter_snapshot_max_per_node: usize,
 }
 
 impl Default for ControllerConfig {
@@ -17,6 +19,8 @@ impl Default for ControllerConfig {
             heartbeat_expect_interval: Duration::from_secs(30),
             heartbeat_miss_threshold: 3,
             start_time: Instant::now(),
+            counter_snapshot_retention: Duration::from_secs(3600),
+            counter_snapshot_max_per_node: 120,
         }
     }
 }

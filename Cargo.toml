@@ -53,6 +53,9 @@ tokio-stream = { version = "0.1", features = ["net"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 tonic-health = "0.12"
 
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
 # Metrics
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }

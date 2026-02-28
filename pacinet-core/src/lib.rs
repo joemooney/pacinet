@@ -13,6 +13,7 @@ pub use error::PaciNetError;
 pub use fsm::{FsmDefinition, FsmError, FsmInstance, FsmInstanceStatus, FsmKind};
 pub use hash::policy_hash;
 pub use model::{
-    DeploymentRecord, DeploymentResult, Node, NodeState, Policy, PolicyVersion, RuleCounter,
+    CounterSnapshot, DeploymentRecord, DeploymentResult, Node, NodeState, Policy, PolicyVersion,
+    RuleCounter,
 };
 pub use storage::{StatusSummary, Storage};

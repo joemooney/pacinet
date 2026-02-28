@@ -6,6 +6,9 @@
 - **Node lifecycle**: registration, heartbeat, policy deployment, counter collection
 - **End-to-end deployment**: CLI → Controller → Agent → PacGate
 - **YAML-defined FSM engine**: operator-defined deployment state machines (canary, staged, rollback)
+- **Adaptive policy FSMs**: counter-rate-driven state machines for automated escalation/de-escalation (e.g., DDoS mitigation)
+- **Counter rate tracking**: in-memory ring buffer of counter snapshots, rate calculation, multi-node aggregation (any/all/sum)
+- **Webhook alerts**: FSM alert actions deliver JSON payloads via HTTP webhooks with bearer/basic auth and retry
 - **FSM orchestration**: background evaluation loop, condition-driven transitions, timer transitions, manual advance
 - **PacGate integration**: agent invokes `pacgate` CLI as subprocess (YAML interface)
 - **PacGateBackend abstraction**: Real (subprocess) or Mock (for testing)
@@ -81,6 +84,10 @@ make test-all                  # Run tests + clippy
 - **Graceful shutdown**: tokio::signal::ctrl_c() + watch channel for heartbeat loop + serve_with_shutdown
 - **FSM definitions**: YAML-parsed via serde_yaml, validated for consistency (initial state exists, transition targets valid, terminal states have no transitions)
 - **FSM engine**: background eval loop (5s interval), condition evaluation (Simple/Counter/Compound), timer transitions, deploy action execution via shared deploy module
+- **Counter condition evaluation**: rate from snapshot pairs, aggregate modes (any/all/sum), `for_duration` sustained threshold tracking via `counter_condition_first_true` HashMap
+- **Counter snapshot cache**: in-memory ring buffer (`CounterSnapshotCache`) per node, configurable retention (default 1h) and max snapshots (default 120), evicted by reaper
+- **Webhook delivery**: `reqwest` with rustls-tls, bearer/basic auth, custom headers, exponential backoff retry (max 2), fire-and-forget via `tokio::spawn`
+- **ConditionDefinition enum ordering**: Counter, Simple, Compound — critical for `serde(untagged)` deserialization (Counter has required `counter` field, Simple before Compound to prevent all-optional Compound matching first)
 - **FSM storage**: JSON blob storage in both MemoryStorage and SqliteStorage
 - **ActionDefinition as struct**: uses optional fields (deploy/rollback/alert) rather than enum due to serde_yaml 0.9 tag requirements
 - Proto types do NOT have serde derives (prost_types::Timestamp incompatibility)

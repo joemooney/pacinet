@@ -187,9 +187,9 @@ enum FsmCommands {
     Start {
         /// Definition name
         name: String,
-        /// Path to rules YAML file
+        /// Path to rules YAML file (required for deployment FSMs, optional for adaptive)
         #[arg(long)]
-        rules: String,
+        rules: Option<String>,
         /// Enable counters
         #[arg(long)]
         counters: bool,
@@ -199,6 +199,9 @@ enum FsmCommands {
         /// Enable connection tracking
         #[arg(long)]
         conntrack: bool,
+        /// Target node label filter for adaptive policy FSMs (key=value)
+        #[arg(short, long, value_parser = parse_label)]
+        label: Vec<(String, String)>,
     },
     /// Show FSM instance status
     #[command(name = "status")]
@@ -1037,9 +1040,16 @@ async fn handle_fsm(
             counters,
             rate_limit,
             conntrack,
+            label,
         } => {
-            let rules_yaml = std::fs::read_to_string(&rules)
-                .context(format!("Failed to read rules file: {}", rules))?;
+            let rules_yaml = match rules {
+                Some(ref path) => std::fs::read_to_string(path)
+                    .context(format!("Failed to read rules file: {}", path))?,
+                None => String::new(),
+            };
+
+            let target_label_filter: std::collections::HashMap<String, String> =
+                label.into_iter().collect();
 
             let response = client
                 .start_fsm(pacinet_proto::StartFsmRequest {
@@ -1050,6 +1060,7 @@ async fn handle_fsm(
                         rate_limit,
                         conntrack,
                     }),
+                    target_label_filter,
                 })
                 .await?
                 .into_inner();
