@@ -261,3 +261,101 @@ Implement Phase 4: mTLS security on all gRPC channels, Prometheus metrics, polic
 ### Git Operations
 - Committed Phase 4 changes
 - Pushed to GitHub
+
+## Session 5 — YAML-Defined FSM Engine (2026-02-27)
+
+### Prompt
+Implement Phase 5: YAML-defined FSM engine for deployment orchestration. Add a generic FSM engine to pacinet-core (reusable by PacGate) and integrate it into PaciNet for deployment state machines — operator-defined rollout strategies (canary, staged, rollback) expressed as YAML FSMs.
+
+### Actions Taken
+
+#### 1. FSM Types in pacinet-core (`pacinet-core/src/fsm/`)
+- **mod.rs**: Module root with re-exports and `parse_duration()` utility (parses "5m"/"30s"/"1h"/"2h30m" into std::time::Duration). 6 unit tests.
+- **definition.rs**: YAML-parseable FSM definition types — FsmDefinition, StateDefinition, TransitionDefinition, ConditionDefinition (enum: Simple/Counter/Compound), ActionDefinition (struct with optional fields: deploy/rollback/alert), DeployAction, NodeSelector, CompileOptions, RollbackAction, AlertAction. `from_yaml()` and `validate()` methods. 9 unit tests.
+- **instance.rs**: Runtime FSM execution types — FsmInstance, FsmContext, ActionResult, NodeActionResult, FsmTransitionRecord, TransitionTrigger, FsmInstanceStatus. `new()`, `transition()`, `is_running()` methods. 3 unit tests.
+- **error.rs**: FsmError enum (InvalidDefinition, InstanceNotFound, DefinitionNotFound, InvalidState, NoTransition, AlreadyCompleted, ActionError, YamlParse).
+- **lib.rs**: Added `pub mod fsm;` and re-exports for FsmDefinition, FsmError, FsmInstance, FsmInstanceStatus, FsmKind.
+- **error.rs**: Added `Fsm(FsmError)` variant to PaciNetError with tonic Status mappings.
+
+#### 2. Storage Trait Extension
+- Extended `Storage` trait with 8 FSM methods: store/get/list/delete FSM definitions, store/get/update/list FSM instances.
+- **MemoryStorage**: Added `fsm_definitions: RwLock<HashMap>` and `fsm_instances: RwLock<HashMap>`, implemented all 8 methods.
+- **SqliteStorage**: Added `fsm_definitions` and `fsm_instances` tables with JSON blob storage, implemented all 8 methods.
+- **schema.sql**: Added fsm_definitions table (name PK), fsm_instances table (instance_id PK) with indexes on status and definition_name.
+
+#### 3. Proto + CRUD RPCs
+- Added 9 RPCs to PaciNetManagement: CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm.
+- Added ~15 new message types (request/response pairs + FsmInstanceInfo, FsmTransitionInfo, FsmDefinitionSummary).
+
+#### 4. Shared Deploy Module (`pacinet-server/src/deploy.rs`)
+- Extracted deploy logic from ManagementService into reusable functions: `deploy_to_node()`, `deploy_to_nodes()`, `forward_deploy_to_agent()`.
+- ManagementService refactored to delegate to shared module.
+- FsmEngine uses same shared module for deploy actions.
+
+#### 5. FSM Engine (`pacinet-server/src/fsm_engine.rs`)
+- Background evaluation loop (5s interval) with shutdown watch channel.
+- `start_instance()`: creates instance, executes initial state action.
+- `advance_instance()`: manual advance for `manual: true` conditions.
+- `cancel_instance()`: marks instance as Cancelled.
+- `evaluate_instance()`: evaluates transitions (condition/timer), fires transitions, executes target state actions.
+- `evaluate_condition()`: handles Simple (all_succeeded/any_failed/manual), Counter (deferred), Compound (and/or/not).
+- `execute_deploy()`: selects nodes by labels, applies limit/batch_percent, calls shared deploy module.
+- `execute_rollback()`: rolls back deployed nodes to previous policy version.
+- `execute_alert()`: log-only alert.
+
+#### 6. FSM RPCs in ManagementService
+- Added `fsm_engine: Option<Arc<FsmEngine>>` field.
+- Implemented all 9 FSM RPCs delegating to engine and storage.
+- Added `instance_to_proto()` helper for FsmInstance → FsmInstanceInfo conversion.
+
+#### 7. CLI FSM Subcommands (`pacinet-cli/src/main.rs`)
+- Added `FsmCommands` enum with 9 subcommands: Create, List, Show, Delete, Start, InstanceStatus, Instances, Advance, Cancel.
+- Full implementation for all subcommands with human-readable and JSON output.
+
+#### 8. Server Main Wiring (`pacinet-server/src/main.rs`)
+- Creates `Arc<FsmEngine>` with storage, config, and TLS config.
+- Spawns FSM engine background loop with watch channel shutdown.
+- Passes engine to ManagementService via `.with_fsm_engine()`.
+- Updated shutdown handler to signal FSM engine.
+
+#### 9. FSM Metrics (`pacinet-server/src/metrics.rs`)
+- `record_fsm_transition()`: increments transition counter.
+- `record_fsm_instance_status()`: increments instance lifecycle counter.
+- `update_fsm_running_gauge()`: updates running instances gauge.
+
+#### 10. Integration Tests
+- 6 new FSM integration tests:
+  - `test_fsm_definition_crud`: create, get, list, delete definitions via gRPC.
+  - `test_fsm_start_and_auto_complete`: deploy succeeds → all_succeeded → complete (terminal).
+  - `test_fsm_manual_advance`: deploy then manually advance to terminal state.
+  - `test_fsm_cancel_running_instance`: start then cancel before timer fires.
+  - `test_fsm_list_instances`: filter by definition name and status.
+  - `test_fsm_deploy_failure_triggers_transition`: unreachable agent → any_failed → failed (terminal).
+
+#### 11. Example YAML
+- Created `examples/canary-rollout.yaml` with canary → validate → staged → complete/rollback FSM.
+
+#### 12. Documentation
+- Updated CLAUDE.md: added FSM features, FSM RPCs, FSM design decisions.
+- Updated OVERVIEW.md: added FSM engine to component descriptions, updated status to Phase 5.
+- Updated REQUIREMENTS.md: added section 3 (FSM Engine) with 7 subsections, added FSM CLI commands, FSM metrics, FSM integration tests, renumbered subsequent sections.
+- Updated PROMPT_HISTORY.md: added Session 5 with full details.
+
+### Errors Encountered & Fixed
+- **serde_yaml 0.9 enum serialization**: Changed ActionDefinition from enum to struct with optional fields.
+- **Missing imports in fsm_engine.rs**: Added ConditionDefinition, RollbackAction, AlertAction to `pub use` in mod.rs.
+- **Deprecated chrono method**: Replaced `chrono::Duration::max_value()` with `chrono::Duration::MAX`.
+- **Type inference errors**: Added explicit type annotation `|c: &ConditionDefinition|` for compound condition closures.
+- **Unused imports in service.rs**: Removed DeploymentRecord, DeploymentResult, debug after deploy refactoring.
+
+### Test Results
+- 68 tests total, all passing:
+  - 27 core tests (7 model/hash + 18 FSM definition/instance/parse_duration + 2 hash)
+  - 18 server storage tests (9 memory + 9 SQLite)
+  - 10 agent tests (5 pacgate × 2)
+  - 13 integration tests (7 existing + 6 FSM)
+- cargo clippy --workspace -- -D warnings: clean
+
+### Git Operations
+- Committed Phase 5 changes
+- Pushed to GitHub

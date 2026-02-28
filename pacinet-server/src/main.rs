@@ -118,9 +118,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     info!("PaciNet controller starting on {}", addr);
 
+    // Create FSM engine
+    let fsm_engine = Arc::new(pacinet_server::fsm_engine::FsmEngine::new(
+        storage.clone(),
+        config.clone(),
+        tls_config.clone(),
+    ));
+
     let controller_service = service::ControllerService::new(storage.clone());
     let management_service = service::ManagementService::new(storage.clone(), config.clone())
-        .with_tls(tls_config.clone());
+        .with_tls(tls_config.clone())
+        .with_fsm_engine(fsm_engine.clone());
+
+    // Spawn FSM engine evaluation loop
+    let (fsm_shutdown_tx, fsm_shutdown_rx) = tokio::sync::watch::channel(false);
+    let fsm_engine_clone = fsm_engine.clone();
+    tokio::spawn(async move {
+        fsm_engine_clone.run(fsm_shutdown_rx).await;
+    });
 
     // Spawn stale node reaper + metrics updater
     let reaper_storage = storage.clone();
@@ -176,11 +191,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         >>()
         .await;
 
-    let shutdown = async {
+    let shutdown = async move {
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C handler");
         info!("Shutdown signal received, draining connections...");
+        let _ = fsm_shutdown_tx.send(true);
     };
 
     let mut server = tonic::transport::Server::builder();

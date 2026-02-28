@@ -99,6 +99,11 @@ enum Commands {
         #[arg(short, long, value_parser = parse_label)]
         label: Vec<(String, String)>,
     },
+    /// Manage FSM definitions and instances
+    Fsm {
+        #[command(subcommand)]
+        action: FsmCommands,
+    },
     /// Show version
     Version,
 }
@@ -152,6 +157,76 @@ enum PolicyCommands {
         /// Target version (default: previous version)
         #[arg(long, default_value = "0")]
         version: u64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum FsmCommands {
+    /// Create an FSM definition from a YAML file
+    Create {
+        /// Path to FSM definition YAML file
+        file: String,
+    },
+    /// List FSM definitions
+    List {
+        /// Filter by kind (deployment, adaptive_policy)
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Show an FSM definition
+    Show {
+        /// Definition name
+        name: String,
+    },
+    /// Delete an FSM definition
+    Delete {
+        /// Definition name
+        name: String,
+    },
+    /// Start an FSM instance
+    Start {
+        /// Definition name
+        name: String,
+        /// Path to rules YAML file
+        #[arg(long)]
+        rules: String,
+        /// Enable counters
+        #[arg(long)]
+        counters: bool,
+        /// Enable rate limiting
+        #[arg(long)]
+        rate_limit: bool,
+        /// Enable connection tracking
+        #[arg(long)]
+        conntrack: bool,
+    },
+    /// Show FSM instance status
+    #[command(name = "status")]
+    InstanceStatus {
+        /// Instance ID
+        instance_id: String,
+    },
+    /// List FSM instances
+    Instances {
+        /// Filter by definition name
+        #[arg(long)]
+        definition: Option<String>,
+        /// Filter by status (running, completed, failed, cancelled)
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Manually advance an FSM instance
+    Advance {
+        /// Instance ID
+        instance_id: String,
+        /// Target state (if not specified, advances to next valid state)
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Cancel a running FSM instance
+    Cancel {
+        /// Instance ID
+        instance_id: String,
     },
 }
 
@@ -281,6 +356,9 @@ async fn main() -> Result<()> {
         }
         Commands::Status { label } => {
             handle_status(&cli.server, label, cli.json, &tls_config).await?
+        }
+        Commands::Fsm { action } => {
+            handle_fsm(action, &cli.server, cli.json, &tls_config).await?
         }
         Commands::Version => {
             println!("pacinet {}", env!("CARGO_PKG_VERSION"));
@@ -850,4 +928,273 @@ async fn handle_status(
     }
 
     Ok(())
+}
+
+async fn handle_fsm(
+    action: FsmCommands,
+    server: &str,
+    as_json: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
+) -> Result<()> {
+    let mut client = connect(server, tls_config).await?;
+
+    match action {
+        FsmCommands::Create { file } => {
+            let yaml = std::fs::read_to_string(&file)
+                .context(format!("Failed to read FSM definition: {}", file))?;
+
+            let response = client
+                .create_fsm_definition(pacinet_proto::CreateFsmDefinitionRequest {
+                    definition_yaml: yaml,
+                })
+                .await?
+                .into_inner();
+
+            if response.success {
+                println!("FSM definition '{}' created", response.name);
+            } else {
+                eprintln!("Failed: {}", response.message);
+            }
+        }
+        FsmCommands::List { kind } => {
+            let response = client
+                .list_fsm_definitions(pacinet_proto::ListFsmDefinitionsRequest {
+                    kind: kind.unwrap_or_default(),
+                })
+                .await?
+                .into_inner();
+
+            if as_json {
+                let defs: Vec<_> = response
+                    .definitions
+                    .iter()
+                    .map(|d| {
+                        serde_json::json!({
+                            "name": d.name,
+                            "kind": d.kind,
+                            "description": d.description,
+                            "states": d.state_count,
+                            "initial": d.initial_state,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&defs)?);
+            } else if response.definitions.is_empty() {
+                println!("No FSM definitions");
+            } else {
+                println!(
+                    "{:<25} {:<15} {:<6} {:<12} DESCRIPTION",
+                    "NAME", "KIND", "STATES", "INITIAL"
+                );
+                for d in &response.definitions {
+                    println!(
+                        "{:<25} {:<15} {:<6} {:<12} {}",
+                        d.name, d.kind, d.state_count, d.initial_state, d.description
+                    );
+                }
+            }
+        }
+        FsmCommands::Show { name } => {
+            let response = client
+                .get_fsm_definition(pacinet_proto::GetFsmDefinitionRequest {
+                    name: name.clone(),
+                })
+                .await?
+                .into_inner();
+
+            if as_json {
+                let val = serde_json::json!({
+                    "name": response.name,
+                    "kind": response.kind,
+                    "description": response.description,
+                });
+                println!("{}", serde_json::to_string_pretty(&val)?);
+            } else {
+                println!("Name:        {}", response.name);
+                println!("Kind:        {}", response.kind);
+                println!("Description: {}", response.description);
+                println!("---");
+                println!("{}", response.definition_yaml);
+            }
+        }
+        FsmCommands::Delete { name } => {
+            let response = client
+                .delete_fsm_definition(pacinet_proto::DeleteFsmDefinitionRequest {
+                    name: name.clone(),
+                })
+                .await?
+                .into_inner();
+
+            if response.success {
+                println!("FSM definition '{}' deleted", name);
+            } else {
+                eprintln!("{}", response.message);
+            }
+        }
+        FsmCommands::Start {
+            name,
+            rules,
+            counters,
+            rate_limit,
+            conntrack,
+        } => {
+            let rules_yaml = std::fs::read_to_string(&rules)
+                .context(format!("Failed to read rules file: {}", rules))?;
+
+            let response = client
+                .start_fsm(pacinet_proto::StartFsmRequest {
+                    definition_name: name.clone(),
+                    rules_yaml,
+                    options: Some(pacinet_proto::CompileOptions {
+                        counters,
+                        rate_limit,
+                        conntrack,
+                    }),
+                })
+                .await?
+                .into_inner();
+
+            if response.success {
+                println!("FSM instance started: {}", response.instance_id);
+            } else {
+                eprintln!("Failed: {}", response.message);
+            }
+        }
+        FsmCommands::InstanceStatus { instance_id } => {
+            let response = client
+                .get_fsm_instance(pacinet_proto::GetFsmInstanceRequest {
+                    instance_id: instance_id.clone(),
+                })
+                .await?
+                .into_inner();
+
+            if let Some(instance) = response.instance {
+                if as_json {
+                    let val = instance_to_json(&instance);
+                    println!("{}", serde_json::to_string_pretty(&val)?);
+                } else {
+                    println!("Instance:    {}", instance.instance_id);
+                    println!("Definition:  {}", instance.definition_name);
+                    println!("State:       {}", instance.current_state);
+                    println!("Status:      {}", instance.status);
+                    println!(
+                        "Nodes:       {} deployed, {} failed, {} target",
+                        instance.deployed_nodes, instance.failed_nodes, instance.target_nodes
+                    );
+                    if !instance.history.is_empty() {
+                        println!("\nTransition History:");
+                        for t in &instance.history {
+                            let time = t
+                                .timestamp
+                                .as_ref()
+                                .and_then(|ts| {
+                                    chrono::DateTime::from_timestamp(ts.seconds, 0)
+                                        .map(|dt| dt.format("%H:%M:%S").to_string())
+                                })
+                                .unwrap_or_else(|| "?".to_string());
+                            if t.from_state.is_empty() {
+                                println!("  {} -> {} [{}] {}", time, t.to_state, t.trigger, t.message);
+                            } else {
+                                println!(
+                                    "  {} {} -> {} [{}] {}",
+                                    time, t.from_state, t.to_state, t.trigger, t.message
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                eprintln!("Instance {} not found", instance_id);
+            }
+        }
+        FsmCommands::Instances {
+            definition,
+            status,
+        } => {
+            let response = client
+                .list_fsm_instances(pacinet_proto::ListFsmInstancesRequest {
+                    definition_name: definition.unwrap_or_default(),
+                    status: status.unwrap_or_default(),
+                })
+                .await?
+                .into_inner();
+
+            if as_json {
+                let instances: Vec<_> = response
+                    .instances
+                    .iter()
+                    .map(instance_to_json)
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&instances)?);
+            } else if response.instances.is_empty() {
+                println!("No FSM instances");
+            } else {
+                println!(
+                    "{:<38} {:<20} {:<12} {:<10} {:>3}/{:>3}",
+                    "INSTANCE ID", "DEFINITION", "STATE", "STATUS", "OK", "FAIL"
+                );
+                for i in &response.instances {
+                    println!(
+                        "{:<38} {:<20} {:<12} {:<10} {:>3}/{:>3}",
+                        i.instance_id,
+                        i.definition_name,
+                        i.current_state,
+                        i.status,
+                        i.deployed_nodes,
+                        i.failed_nodes,
+                    );
+                }
+            }
+        }
+        FsmCommands::Advance {
+            instance_id,
+            state,
+        } => {
+            let response = client
+                .advance_fsm(pacinet_proto::AdvanceFsmRequest {
+                    instance_id: instance_id.clone(),
+                    target_state: state.unwrap_or_default(),
+                })
+                .await?
+                .into_inner();
+
+            if response.success {
+                println!(
+                    "FSM advanced to state: {}",
+                    response.current_state
+                );
+            } else {
+                eprintln!("Failed: {}", response.message);
+            }
+        }
+        FsmCommands::Cancel { instance_id } => {
+            let response = client
+                .cancel_fsm(pacinet_proto::CancelFsmRequest {
+                    instance_id: instance_id.clone(),
+                    reason: "Cancelled by operator".to_string(),
+                })
+                .await?
+                .into_inner();
+
+            if response.success {
+                println!("FSM instance {} cancelled", instance_id);
+            } else {
+                eprintln!("Failed: {}", response.message);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn instance_to_json(instance: &pacinet_proto::FsmInstanceInfo) -> serde_json::Value {
+    serde_json::json!({
+        "instance_id": instance.instance_id,
+        "definition_name": instance.definition_name,
+        "current_state": instance.current_state,
+        "status": instance.status,
+        "deployed_nodes": instance.deployed_nodes,
+        "failed_nodes": instance.failed_nodes,
+        "target_nodes": instance.target_nodes,
+    })
 }

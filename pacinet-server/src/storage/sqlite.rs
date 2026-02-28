@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use pacinet_core::error::PaciNetError;
+use pacinet_core::fsm::{FsmDefinition, FsmInstance, FsmInstanceStatus, FsmKind};
 use pacinet_core::model::*;
 use pacinet_core::Storage;
 use rusqlite::Connection;
@@ -456,6 +457,206 @@ impl Storage for SqliteStorage {
         });
 
         Ok((total, by_state, oldest_dt))
+    }
+
+    // ---- FSM operations ----
+
+    fn store_fsm_definition(&self, def: FsmDefinition) -> Result<(), PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let json = serde_json::to_string(&def)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO fsm_definitions (name, kind, definition_json, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                &def.name,
+                def.kind.to_string(),
+                json,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| PaciNetError::Internal(format!("Failed to store FSM definition: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_fsm_definition(&self, name: &str) -> Result<Option<FsmDefinition>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT definition_json FROM fsm_definitions WHERE name = ?1",
+                rusqlite::params![name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        match json {
+            None => Ok(None),
+            Some(j) => {
+                let def: FsmDefinition = serde_json::from_str(&j)
+                    .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+                Ok(Some(def))
+            }
+        }
+    }
+
+    fn list_fsm_definitions(
+        &self,
+        kind: Option<FsmKind>,
+    ) -> Result<Vec<FsmDefinition>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &kind {
+            Some(k) => (
+                "SELECT definition_json FROM fsm_definitions WHERE kind = ?1",
+                vec![Box::new(k.to_string())],
+            ),
+            None => (
+                "SELECT definition_json FROM fsm_definitions",
+                vec![],
+            ),
+        };
+
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let defs: Vec<FsmDefinition> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let json: String = row.get(0)?;
+                Ok(json)
+            })
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .filter_map(|j| serde_json::from_str(&j).ok())
+            .collect();
+
+        Ok(defs)
+    }
+
+    fn delete_fsm_definition(&self, name: &str) -> Result<bool, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                "DELETE FROM fsm_definitions WHERE name = ?1",
+                rusqlite::params![name],
+            )
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    fn store_fsm_instance(&self, instance: FsmInstance) -> Result<(), PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let json = serde_json::to_string(&instance)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO fsm_instances (instance_id, definition_name, status, instance_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                &instance.instance_id,
+                &instance.definition_name,
+                instance.status.to_string(),
+                json,
+                instance.created_at.to_rfc3339(),
+                instance.updated_at.to_rfc3339(),
+            ],
+        )
+        .map_err(|e| PaciNetError::Internal(format!("Failed to store FSM instance: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_fsm_instance(&self, id: &str) -> Result<Option<FsmInstance>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT instance_json FROM fsm_instances WHERE instance_id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        match json {
+            None => Ok(None),
+            Some(j) => {
+                let instance: FsmInstance = serde_json::from_str(&j)
+                    .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+                Ok(Some(instance))
+            }
+        }
+    }
+
+    fn update_fsm_instance(&self, instance: FsmInstance) -> Result<(), PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let json = serde_json::to_string(&instance)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        let affected = conn
+            .execute(
+                "UPDATE fsm_instances SET status = ?1, instance_json = ?2, updated_at = ?3 WHERE instance_id = ?4",
+                rusqlite::params![
+                    instance.status.to_string(),
+                    json,
+                    instance.updated_at.to_rfc3339(),
+                    &instance.instance_id,
+                ],
+            )
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        if affected == 0 {
+            return Err(PaciNetError::Fsm(
+                pacinet_core::fsm::FsmError::InstanceNotFound(instance.instance_id),
+            ));
+        }
+        Ok(())
+    }
+
+    fn list_fsm_instances(
+        &self,
+        def_name: Option<&str>,
+        status: Option<FsmInstanceStatus>,
+    ) -> Result<Vec<FsmInstance>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut conditions = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+
+        if let Some(name) = def_name {
+            conditions.push(format!("definition_name = ?{}", idx));
+            params.push(Box::new(name.to_string()));
+            idx += 1;
+        }
+        if let Some(ref s) = status {
+            conditions.push(format!("status = ?{}", idx));
+            params.push(Box::new(s.to_string()));
+        }
+
+        let sql = if conditions.is_empty() {
+            "SELECT instance_json FROM fsm_instances ORDER BY created_at DESC".to_string()
+        } else {
+            format!(
+                "SELECT instance_json FROM fsm_instances WHERE {} ORDER BY created_at DESC",
+                conditions.join(" AND ")
+            )
+        };
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let instances: Vec<FsmInstance> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let json: String = row.get(0)?;
+                Ok(json)
+            })
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .filter_map(|j| serde_json::from_str(&j).ok())
+            .collect();
+
+        Ok(instances)
     }
 }
 

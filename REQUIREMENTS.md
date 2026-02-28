@@ -57,96 +57,146 @@
 - Rollback to previous version when no version specified
 - Re-deploys the historical YAML through the normal deploy flow
 
-## 3. Counter Collection
+## 3. FSM Engine (Deployment Orchestration)
 
-### 3.1 Node Counters
+### 3.1 FSM Definitions
+- YAML-defined finite state machines for deployment strategies (canary, staged rollout, etc.)
+- Parsed via serde_yaml with FsmDefinition, StateDefinition, TransitionDefinition types
+- Validation: initial state exists, all transition targets exist, terminal states have no transitions, durations parse
+- Kinds: Deployment (supported), AdaptivePolicy (designed, deferred to Phase 5b)
+
+### 3.2 FSM States and Transitions
+- States have optional actions (deploy, rollback, alert) and transitions
+- Terminal states have no transitions and mark instance as Completed
+- Transition conditions: Simple (all_succeeded, any_failed, manual), Counter (deferred), Compound (and/or/not)
+- Timer transitions: `after: 5m` / `30s` / `1h` duration syntax
+
+### 3.3 FSM Actions
+- Deploy: select nodes by label filter, optional limit, optional batch_percent, compile options
+- Rollback: target previous policy version, redeploys via shared deploy module
+- Alert: log-only (webhook delivery deferred to Phase 5b)
+
+### 3.4 FSM Engine
+- Background evaluation loop running every 5 seconds
+- Evaluates all Running instances, checks transition conditions
+- Executes target state actions on transition
+- Graceful shutdown via watch channel
+
+### 3.5 FSM Instance Lifecycle
+- Created from a definition with rules_yaml and compile options
+- Status: Running → Completed / Failed / Cancelled
+- Context tracks: target nodes, deployed nodes, failed nodes, batch cursor, last action result
+- History records all transitions with timestamp, trigger type, and message
+
+### 3.6 FSM gRPC RPCs
+- CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition
+- StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm
+
+### 3.7 FSM Storage
+- Stored as JSON blobs in both MemoryStorage and SqliteStorage
+- Tables: fsm_definitions (name PK), fsm_instances (instance_id PK, indexed by status and definition_name)
+
+## 4. Counter Collection
+
+### 4.1 Node Counters
 - Agents report rule match counters to controller
 - Counters include: rule name, match count, byte count
 
-### 3.2 Aggregate Counters
+### 4.2 Aggregate Counters
 - CLI can query counters for individual nodes or aggregate across nodes
 - Aggregation supports label-based filtering
 
-## 4. CLI Interface
+## 5. CLI Interface
 
-### 4.1 Node Commands
+### 5.1 Node Commands
 - `pacinet node list [--label key=val]` — shows policy hash and heartbeat age columns
 - `pacinet node show <node-id>` — shows enriched node details
 - `pacinet node remove <node-id>`
 
-### 4.2 Deployment Commands
+### 5.2 Deployment Commands
 - `pacinet deploy <rules.yaml> --node <node-id> [--counters] [--rate-limit] [--conntrack]` — single-node deploy
 - `pacinet deploy <rules.yaml> --label key=val [--counters]` — batch deploy with per-node result table and summary
 - `pacinet deploy history <node-id> [--limit N]` — deployment audit trail
 
-### 4.3 Policy Commands
+### 5.3 Policy Commands
 - `pacinet policy show <node-id>`
 - `pacinet policy diff <node-a> <node-b>` — unified diff between two node policies
 - `pacinet policy history <node-id> [--limit N]` — policy version history
 - `pacinet policy rollback <node-id> [--version N]` — rollback to previous or specific version
 
-### 4.4 Counter Commands
+### 5.4 Counter Commands
 - `pacinet counters <node-id> [--json]`
 - `pacinet counters --aggregate [--label key=val]`
 
-### 4.5 Status Commands
+### 5.5 Status Commands
 - `pacinet status [--label key=val]` — fleet status with node counts by state and enriched node table
 
-### 4.6 Output Formats
+### 5.6 FSM Commands
+- `pacinet fsm create <file.yaml>` — create FSM definition from YAML file
+- `pacinet fsm list [--kind deployment]` — list definitions
+- `pacinet fsm show <name>` — show definition YAML
+- `pacinet fsm delete <name>` — delete definition
+- `pacinet fsm start <name> --rules <file> [--counters]` — start FSM instance
+- `pacinet fsm status <instance-id>` — show instance status with transition history
+- `pacinet fsm instances [--definition X] [--status running]` — list instances
+- `pacinet fsm advance <instance-id> [--state X]` — manually advance instance
+- `pacinet fsm cancel <instance-id>` — cancel running instance
+
+### 5.7 Output Formats
 - Human-readable table output (default)
 - JSON output via `--json` flag
 
-## 5. Communication
+## 6. Communication
 
-### 5.1 gRPC Services
+### 6.1 gRPC Services
 - PaciNetController (agent → controller): RegisterNode, Heartbeat, ReportCounters
 - PaciNetAgent (controller → agent): DeployRules, GetCounters, GetStatus
-- PaciNetManagement (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy
+- PaciNetManagement (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy, CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm
 
-### 5.2 Port Assignments
+### 6.2 Port Assignments
 - Controller: 50054 (configurable)
 - Agent: 50055 (configurable per node)
 - Prometheus metrics: 9090 (configurable, 0 to disable)
 
-### 5.3 Health Checks
+### 6.3 Health Checks
 - gRPC health service via tonic-health
 
-### 5.4 gRPC-Web
+### 6.4 gRPC-Web
 - HTTP/1 support via tonic-web for browser-based clients
 
-## 6. Security
+## 7. Security
 
-### 6.1 Mutual TLS (mTLS)
+### 7.1 Mutual TLS (mTLS)
 - Optional mTLS on all gRPC channels
 - Three flags: `--ca-cert`, `--tls-cert`, `--tls-key` (all required together, or all omitted)
 - Channels secured: agent→controller, controller→agent, CLI→controller
 - When TLS absent: plain HTTP for development convenience
 - Certificate generation script for development (`scripts/gen-certs.sh`)
 
-### 6.2 Certificate Management
+### 7.2 Certificate Management
 - CA certificate, server cert, agent cert, client cert — all signed by the same CA
 - Development script uses openssl for self-signed certificates
 - Production: external CA/PKI expected
 
-## 7. PacGate Integration
+## 8. PacGate Integration
 
-### 7.1 Subprocess Invocation
+### 8.1 Subprocess Invocation
 - Agent invokes `pacgate` binary as subprocess
 - YAML rules written to temp file, cleaned up after compilation
 - JSON output parsed for success/warnings/errors
 
-### 7.2 Version Detection
+### 8.2 Version Detection
 - Agent auto-detects PacGate version at startup via `pacgate --version`
 - Override via `--pacgate-version` CLI flag
 - Version reported to controller during registration
 
-### 7.3 Decoupling
+### 8.3 Decoupling
 - PaciNet has no compile-time dependency on PacGate
 - YAML is the sole interface contract
 
-## 8. Observability
+## 9. Observability
 
-### 8.1 Prometheus Metrics
+### 9.1 Prometheus Metrics
 - HTTP endpoint on configurable port (default 9090, 0 to disable)
 - Metrics exposed:
   - `pacinet_nodes_total` (gauge) — total registered nodes
@@ -158,22 +208,25 @@
   - `pacinet_batch_deploys_total` (counter) — batch deploy operations
   - `pacinet_batch_deploy_nodes{result}` (counter) — per-node batch results
   - `pacinet_controller_uptime_seconds` (gauge) — process uptime
+  - `pacinet_fsm_transitions_total` (counter) — FSM state transitions
+  - `pacinet_fsm_instances{status}` (counter) — FSM instance lifecycle events
+  - `pacinet_fsm_running_instances` (gauge) — currently running FSM instances
 
-### 8.2 Structured Logging
+### 9.2 Structured Logging
 - via tracing with EnvFilter
 - `#[tracing::instrument]` on gRPC handlers
 - Debug level for heartbeat to reduce noise
 - `RUST_LOG` environment variable for filtering
 
-## 9. Non-Functional Requirements
+## 10. Non-Functional Requirements
 
-### 9.1 Storage
+### 10.1 Storage
 - Storage trait (`Arc<dyn Storage>`) for backend abstraction
 - MemoryStorage: in-memory with RwLock (default for dev/test)
 - SqliteStorage: rusqlite with WAL mode, foreign keys, schema migrations (for production)
 - Controller selects backend via `--db <path>` flag (omit for in-memory)
 
-### 9.2 Configuration
+### 10.2 Configuration
 - `--deploy-timeout` (default 30s)
 - `--heartbeat-expect-interval` (default 30s)
 - `--heartbeat-miss-threshold` (default 3)
@@ -181,18 +234,18 @@
 - `--metrics-port` (default 9090, 0 to disable)
 - `RUST_LOG` environment variable for log filtering
 
-### 9.3 Error Handling
+### 10.3 Error Handling
 - Domain errors (PaciNetError) map to gRPC Status codes
 - InvalidStateTransition → failed_precondition
 - ConcurrentDeploy → aborted
 - Graceful handling of agent disconnections
 
-### 9.4 Graceful Shutdown
+### 10.4 Graceful Shutdown
 - Server: SIGINT/SIGTERM → drain in-flight RPCs via serve_with_shutdown
 - Agent: SIGINT → stop heartbeat loop via watch channel, drain gRPC server
 - Clean log messages on shutdown
 
-### 9.5 Testing
+### 10.5 Testing
 - Unit tests for model types (state transitions, FromStr roundtrips)
 - Unit tests for MemoryStorage (9 tests: register, remove, filter, state transitions, invalid transition, concurrent deploy, policy versioning, deployment audit, stale detection)
 - Unit tests for SqliteStorage (9 tests mirroring MemoryStorage, using in-memory SQLite)
@@ -205,9 +258,15 @@
   - Batch deploy partial failure: mixed results
   - Fleet status: node counts by state, enriched summaries
   - Stale node detection: node goes offline after missed heartbeats
+  - FSM definition CRUD: create, get, list, delete
+  - FSM start and auto-complete: deploy succeeds → all_succeeded → terminal
+  - FSM manual advance: deploy then manual gate transition
+  - FSM cancel running instance
+  - FSM list instances with filters
+  - FSM deploy failure triggers transition: unreachable agent → any_failed → terminal
 - PacGateBackend enum (Real | Mock) for test isolation
 
-### 9.6 CI/CD
+### 10.6 CI/CD
 - GitHub Actions pipeline on push and pull_request
 - Steps: cargo check, clippy (warnings as errors), test, fmt check
 - Rust stable toolchain with caching

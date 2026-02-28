@@ -56,6 +56,17 @@ service PaciNetManagement {
   rpc GetPolicyHistory(GetPolicyHistoryRequest) returns (GetPolicyHistoryResponse);
   rpc GetDeploymentHistory(GetDeploymentHistoryRequest) returns (GetDeploymentHistoryResponse);
   rpc RollbackPolicy(RollbackPolicyRequest) returns (RollbackPolicyResponse);
+
+  // Phase 5: FSM management
+  rpc CreateFsmDefinition(CreateFsmDefinitionRequest) returns (CreateFsmDefinitionResponse);
+  rpc GetFsmDefinition(GetFsmDefinitionRequest) returns (GetFsmDefinitionResponse);
+  rpc ListFsmDefinitions(ListFsmDefinitionsRequest) returns (ListFsmDefinitionsResponse);
+  rpc DeleteFsmDefinition(DeleteFsmDefinitionRequest) returns (DeleteFsmDefinitionResponse);
+  rpc StartFsm(StartFsmRequest) returns (StartFsmResponse);
+  rpc GetFsmInstance(GetFsmInstanceRequest) returns (GetFsmInstanceResponse);
+  rpc ListFsmInstances(ListFsmInstancesRequest) returns (ListFsmInstancesResponse);
+  rpc AdvanceFsm(AdvanceFsmRequest) returns (AdvanceFsmResponse);
+  rpc CancelFsm(CancelFsmRequest) returns (CancelFsmResponse);
 }
 
 // ============================================================================
@@ -342,4 +353,125 @@ message RollbackPolicyResponse {
   bool success = 1;
   string message = 2;
   uint64 rolled_back_to_version = 3;
+}
+
+// ============================================================================
+// Phase 5: FSM messages
+// ============================================================================
+
+message CreateFsmDefinitionRequest {
+  string definition_yaml = 1;
+}
+
+message CreateFsmDefinitionResponse {
+  bool success = 1;
+  string name = 2;
+  string message = 3;
+}
+
+message GetFsmDefinitionRequest {
+  string name = 1;
+}
+
+message GetFsmDefinitionResponse {
+  string name = 1;
+  string kind = 2;
+  string description = 3;
+  string definition_yaml = 4;
+}
+
+message ListFsmDefinitionsRequest {
+  string kind = 1;  // optional filter: "deployment" or "adaptive_policy"
+}
+
+message ListFsmDefinitionsResponse {
+  repeated FsmDefinitionSummary definitions = 1;
+}
+
+message FsmDefinitionSummary {
+  string name = 1;
+  string kind = 2;
+  string description = 3;
+  uint32 state_count = 4;
+  string initial_state = 5;
+}
+
+message DeleteFsmDefinitionRequest {
+  string name = 1;
+}
+
+message DeleteFsmDefinitionResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message StartFsmRequest {
+  string definition_name = 1;
+  string rules_yaml = 2;
+  CompileOptions options = 3;
+}
+
+message StartFsmResponse {
+  bool success = 1;
+  string instance_id = 2;
+  string message = 3;
+}
+
+message GetFsmInstanceRequest {
+  string instance_id = 1;
+}
+
+message GetFsmInstanceResponse {
+  FsmInstanceInfo instance = 1;
+}
+
+message FsmInstanceInfo {
+  string instance_id = 1;
+  string definition_name = 2;
+  string current_state = 3;
+  string status = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+  repeated FsmTransitionInfo history = 7;
+  uint32 deployed_nodes = 8;
+  uint32 failed_nodes = 9;
+  uint32 target_nodes = 10;
+}
+
+message FsmTransitionInfo {
+  string from_state = 1;
+  string to_state = 2;
+  string trigger = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  string message = 5;
+}
+
+message ListFsmInstancesRequest {
+  string definition_name = 1;  // optional filter
+  string status = 2;           // optional filter: "running", "completed", etc.
+}
+
+message ListFsmInstancesResponse {
+  repeated FsmInstanceInfo instances = 1;
+}
+
+message AdvanceFsmRequest {
+  string instance_id = 1;
+  string target_state = 2;  // optional: if empty, advances to next valid state
+}
+
+message AdvanceFsmResponse {
+  bool success = 1;
+  string current_state = 2;
+  string message = 3;
+}
+
+message CancelFsmRequest {
+  string instance_id = 1;
+  string reason = 2;
+}
+
+message CancelFsmResponse {
+  bool success = 1;
+  string message = 2;
 }

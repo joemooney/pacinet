@@ -1,4 +1,5 @@
 use crate::error::PaciNetError;
+use crate::fsm::{FsmDefinition, FsmInstance, FsmInstanceStatus, FsmKind};
 use crate::model::*;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -94,4 +95,37 @@ pub trait Storage: Send + Sync {
 
     /// Return (total_nodes, nodes_by_state, oldest_heartbeat).
     fn status_summary(&self) -> Result<StatusSummary, PaciNetError>;
+
+    // ---- FSM operations ----
+
+    /// Store an FSM definition (upsert by name).
+    fn store_fsm_definition(&self, def: FsmDefinition) -> Result<(), PaciNetError>;
+
+    /// Get an FSM definition by name.
+    fn get_fsm_definition(&self, name: &str) -> Result<Option<FsmDefinition>, PaciNetError>;
+
+    /// List FSM definitions, optionally filtered by kind.
+    fn list_fsm_definitions(
+        &self,
+        kind: Option<FsmKind>,
+    ) -> Result<Vec<FsmDefinition>, PaciNetError>;
+
+    /// Delete an FSM definition by name. Returns true if it existed.
+    fn delete_fsm_definition(&self, name: &str) -> Result<bool, PaciNetError>;
+
+    /// Store a new FSM instance.
+    fn store_fsm_instance(&self, instance: FsmInstance) -> Result<(), PaciNetError>;
+
+    /// Get an FSM instance by ID.
+    fn get_fsm_instance(&self, id: &str) -> Result<Option<FsmInstance>, PaciNetError>;
+
+    /// Update an existing FSM instance.
+    fn update_fsm_instance(&self, instance: FsmInstance) -> Result<(), PaciNetError>;
+
+    /// List FSM instances, optionally filtered by definition name and/or status.
+    fn list_fsm_instances(
+        &self,
+        def_name: Option<&str>,
+        status: Option<FsmInstanceStatus>,
+    ) -> Result<Vec<FsmInstance>, PaciNetError>;
 }

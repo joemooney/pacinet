@@ -1,13 +1,14 @@
 use crate::config::ControllerConfig;
+use crate::fsm_engine::FsmEngine;
 use crate::metrics as m;
 use crate::storage::blocking;
-use pacinet_core::model::{DeploymentRecord, DeploymentResult, Node, Policy};
+use pacinet_core::model::{Node, Policy};
 use pacinet_core::Storage;
 use pacinet_proto::*;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 // ============================================================================
 // PaciNetController service — agent → controller
@@ -105,6 +106,7 @@ pub struct ManagementService {
     storage: Arc<dyn Storage>,
     config: ControllerConfig,
     tls_config: Option<pacinet_core::tls::TlsConfig>,
+    fsm_engine: Option<Arc<FsmEngine>>,
 }
 
 impl ManagementService {
@@ -113,11 +115,17 @@ impl ManagementService {
             storage,
             config,
             tls_config: None,
+            fsm_engine: None,
         }
     }
 
     pub fn with_tls(mut self, tls_config: Option<pacinet_core::tls::TlsConfig>) -> Self {
         self.tls_config = tls_config;
+        self
+    }
+
+    pub fn with_fsm_engine(mut self, engine: Arc<FsmEngine>) -> Self {
+        self.fsm_engine = Some(engine);
         self
     }
 }
@@ -590,6 +598,280 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
             })),
         }
     }
+
+    // ---- Phase 5: FSM RPCs ----
+
+    #[tracing::instrument(skip(self, request))]
+    async fn create_fsm_definition(
+        &self,
+        request: Request<CreateFsmDefinitionRequest>,
+    ) -> Result<Response<CreateFsmDefinitionResponse>, Status> {
+        let req = request.into_inner();
+        let def = pacinet_core::fsm::FsmDefinition::from_yaml(&req.definition_yaml)
+            .map_err(|e| Status::invalid_argument(format!("Invalid YAML: {}", e)))?;
+        def.validate()
+            .map_err(|e| Status::invalid_argument(format!("Invalid definition: {}", e)))?;
+        let name = def.name.clone();
+
+        blocking(&self.storage, move |s| s.store_fsm_definition(def)).await?;
+
+        info!(name = %name, "FSM definition created");
+        Ok(Response::new(CreateFsmDefinitionResponse {
+            success: true,
+            name: name.clone(),
+            message: format!("FSM definition '{}' created", name),
+        }))
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn get_fsm_definition(
+        &self,
+        request: Request<GetFsmDefinitionRequest>,
+    ) -> Result<Response<GetFsmDefinitionResponse>, Status> {
+        let req = request.into_inner();
+        let name = req.name.clone();
+        let def = blocking(&self.storage, move |s| s.get_fsm_definition(&name))
+            .await?
+            .ok_or_else(|| Status::not_found(format!("FSM definition '{}' not found", req.name)))?;
+
+        let yaml = serde_yaml::to_string(&def)
+            .map_err(|e| Status::internal(format!("Failed to serialize: {}", e)))?;
+
+        Ok(Response::new(GetFsmDefinitionResponse {
+            name: def.name,
+            kind: def.kind.to_string(),
+            description: def.description,
+            definition_yaml: yaml,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn list_fsm_definitions(
+        &self,
+        request: Request<ListFsmDefinitionsRequest>,
+    ) -> Result<Response<ListFsmDefinitionsResponse>, Status> {
+        let req = request.into_inner();
+        let kind = if req.kind.is_empty() {
+            None
+        } else {
+            Some(
+                req.kind
+                    .parse::<pacinet_core::FsmKind>()
+                    .map_err(Status::invalid_argument)?,
+            )
+        };
+
+        let defs = blocking(&self.storage, move |s| s.list_fsm_definitions(kind)).await?;
+
+        let summaries = defs
+            .into_iter()
+            .map(|d| FsmDefinitionSummary {
+                name: d.name,
+                kind: d.kind.to_string(),
+                description: d.description.clone(),
+                state_count: d.states.len() as u32,
+                initial_state: d.initial,
+            })
+            .collect();
+
+        Ok(Response::new(ListFsmDefinitionsResponse {
+            definitions: summaries,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn delete_fsm_definition(
+        &self,
+        request: Request<DeleteFsmDefinitionRequest>,
+    ) -> Result<Response<DeleteFsmDefinitionResponse>, Status> {
+        let req = request.into_inner();
+        let name = req.name.clone();
+        let deleted = blocking(&self.storage, move |s| s.delete_fsm_definition(&name)).await?;
+
+        Ok(Response::new(DeleteFsmDefinitionResponse {
+            success: deleted,
+            message: if deleted {
+                format!("FSM definition '{}' deleted", req.name)
+            } else {
+                format!("FSM definition '{}' not found", req.name)
+            },
+        }))
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn start_fsm(
+        &self,
+        request: Request<StartFsmRequest>,
+    ) -> Result<Response<StartFsmResponse>, Status> {
+        let req = request.into_inner();
+        let engine = self
+            .fsm_engine
+            .as_ref()
+            .ok_or_else(|| Status::internal("FSM engine not available"))?;
+
+        let compile_opts = req.options.map(|o| pacinet_core::fsm::FsmCompileOptions {
+            counters: o.counters,
+            rate_limit: o.rate_limit,
+            conntrack: o.conntrack,
+        });
+
+        match engine
+            .start_instance(&req.definition_name, req.rules_yaml, compile_opts)
+            .await
+        {
+            Ok(instance) => Ok(Response::new(StartFsmResponse {
+                success: true,
+                instance_id: instance.instance_id,
+                message: "FSM instance started".to_string(),
+            })),
+            Err(e) => Ok(Response::new(StartFsmResponse {
+                success: false,
+                instance_id: String::new(),
+                message: e.to_string(),
+            })),
+        }
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn get_fsm_instance(
+        &self,
+        request: Request<GetFsmInstanceRequest>,
+    ) -> Result<Response<GetFsmInstanceResponse>, Status> {
+        let req = request.into_inner();
+        let id = req.instance_id.clone();
+        let instance = blocking(&self.storage, move |s| s.get_fsm_instance(&id))
+            .await?
+            .ok_or_else(|| {
+                Status::not_found(format!("FSM instance '{}' not found", req.instance_id))
+            })?;
+
+        Ok(Response::new(GetFsmInstanceResponse {
+            instance: Some(instance_to_proto(&instance)),
+        }))
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn list_fsm_instances(
+        &self,
+        request: Request<ListFsmInstancesRequest>,
+    ) -> Result<Response<ListFsmInstancesResponse>, Status> {
+        let req = request.into_inner();
+        let def_name = if req.definition_name.is_empty() {
+            None
+        } else {
+            Some(req.definition_name.clone())
+        };
+        let status = if req.status.is_empty() {
+            None
+        } else {
+            Some(
+                req.status
+                    .parse::<pacinet_core::FsmInstanceStatus>()
+                    .map_err(Status::invalid_argument)?,
+            )
+        };
+
+        let def_name_ref = def_name.clone();
+        let instances = blocking(&self.storage, move |s| {
+            s.list_fsm_instances(def_name_ref.as_deref(), status)
+        })
+        .await?;
+
+        let proto_instances: Vec<FsmInstanceInfo> =
+            instances.iter().map(instance_to_proto).collect();
+
+        Ok(Response::new(ListFsmInstancesResponse {
+            instances: proto_instances,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn advance_fsm(
+        &self,
+        request: Request<AdvanceFsmRequest>,
+    ) -> Result<Response<AdvanceFsmResponse>, Status> {
+        let req = request.into_inner();
+        let engine = self
+            .fsm_engine
+            .as_ref()
+            .ok_or_else(|| Status::internal("FSM engine not available"))?;
+
+        let target = if req.target_state.is_empty() {
+            None
+        } else {
+            Some(req.target_state.clone())
+        };
+
+        match engine.advance_instance(&req.instance_id, target).await {
+            Ok(instance) => Ok(Response::new(AdvanceFsmResponse {
+                success: true,
+                current_state: instance.current_state,
+                message: "FSM advanced".to_string(),
+            })),
+            Err(e) => Ok(Response::new(AdvanceFsmResponse {
+                success: false,
+                current_state: String::new(),
+                message: e.to_string(),
+            })),
+        }
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn cancel_fsm(
+        &self,
+        request: Request<CancelFsmRequest>,
+    ) -> Result<Response<CancelFsmResponse>, Status> {
+        let req = request.into_inner();
+        let engine = self
+            .fsm_engine
+            .as_ref()
+            .ok_or_else(|| Status::internal("FSM engine not available"))?;
+
+        match engine.cancel_instance(&req.instance_id, &req.reason).await {
+            Ok(()) => Ok(Response::new(CancelFsmResponse {
+                success: true,
+                message: "FSM instance cancelled".to_string(),
+            })),
+            Err(e) => Ok(Response::new(CancelFsmResponse {
+                success: false,
+                message: e.to_string(),
+            })),
+        }
+    }
+}
+
+fn instance_to_proto(instance: &pacinet_core::FsmInstance) -> FsmInstanceInfo {
+    FsmInstanceInfo {
+        instance_id: instance.instance_id.clone(),
+        definition_name: instance.definition_name.clone(),
+        current_state: instance.current_state.clone(),
+        status: instance.status.to_string(),
+        created_at: Some(prost_types::Timestamp {
+            seconds: instance.created_at.timestamp(),
+            nanos: 0,
+        }),
+        updated_at: Some(prost_types::Timestamp {
+            seconds: instance.updated_at.timestamp(),
+            nanos: 0,
+        }),
+        history: instance
+            .history
+            .iter()
+            .map(|t| FsmTransitionInfo {
+                from_state: t.from_state.clone(),
+                to_state: t.to_state.clone(),
+                trigger: t.trigger.to_string(),
+                timestamp: Some(prost_types::Timestamp {
+                    seconds: t.timestamp.timestamp(),
+                    nanos: 0,
+                }),
+                message: t.message.clone(),
+            })
+            .collect(),
+        deployed_nodes: instance.context.deployed_nodes.len() as u32,
+        failed_nodes: instance.context.failed_nodes.len() as u32,
+        target_nodes: instance.context.target_nodes.len() as u32,
+    }
 }
 
 impl ManagementService {
@@ -598,157 +880,22 @@ impl ManagementService {
         req: &DeployPolicyRequest,
         node: &Node,
     ) -> Result<Response<DeployPolicyResponse>, Status> {
-        let deploy_start = tokio::time::Instant::now();
-        let policy_hash = pacinet_core::policy_hash(&req.rules_yaml);
         let options = req.options.unwrap_or_default();
-
-        // Store policy
-        let policy = Policy {
-            node_id: req.node_id.clone(),
-            rules_yaml: req.rules_yaml.clone(),
-            policy_hash: policy_hash.clone(),
-            deployed_at: chrono::Utc::now(),
-            counters_enabled: options.counters,
-            rate_limit_enabled: options.rate_limit,
-            conntrack_enabled: options.conntrack,
-        };
-        let node_id = req.node_id.clone();
-        let policy_clone = policy.clone();
-        let version = blocking(&self.storage, move |s| s.store_policy(policy_clone)).await?;
-
-        // Set node to Deploying state
-        let node_id_clone = req.node_id.clone();
-        let _ = blocking(&self.storage, move |s| {
-            s.update_node_state(&node_id_clone, pacinet_core::NodeState::Deploying)
-        })
-        .await;
-
-        // Forward deploy request to agent via gRPC
-        let scheme = if self.tls_config.is_some() {
-            "https"
-        } else {
-            "http"
-        };
-        let agent_addr = format!("{}://{}", scheme, node.agent_address);
-        info!(node_id = %req.node_id, agent = %agent_addr, "Forwarding deploy to agent");
-
-        let deploy_timeout = self.config.deploy_timeout;
-        let agent_result = tokio::time::timeout(
-            deploy_timeout,
-            Self::forward_deploy_to_agent(
-                &agent_addr,
-                &req.rules_yaml,
-                req.options,
-                &self.tls_config,
-            ),
+        let outcome = crate::deploy::deploy_to_node(
+            &self.storage,
+            node,
+            &req.rules_yaml,
+            options,
+            self.config.deploy_timeout,
+            &self.tls_config,
         )
         .await;
 
-        let (response, deploy_result) = match agent_result {
-            Ok(Ok(response)) => {
-                if response.success {
-                    let nid = req.node_id.clone();
-                    let _ = blocking(&self.storage, move |s| {
-                        s.update_node_state(&nid, pacinet_core::NodeState::Active)
-                    })
-                    .await;
-                    info!(node_id = %req.node_id, "Policy deployed successfully to agent");
-                    let resp = DeployPolicyResponse {
-                        success: true,
-                        message: response.message,
-                        warnings: response.warnings,
-                    };
-                    (resp, DeploymentResult::Success)
-                } else {
-                    let nid = req.node_id.clone();
-                    let _ = blocking(&self.storage, move |s| {
-                        s.update_node_state(&nid, pacinet_core::NodeState::Error)
-                    })
-                    .await;
-                    warn!(node_id = %req.node_id, msg = %response.message, "Agent deploy failed");
-                    let resp = DeployPolicyResponse {
-                        success: false,
-                        message: response.message,
-                        warnings: response.warnings,
-                    };
-                    (resp, DeploymentResult::AgentFailure)
-                }
-            }
-            Ok(Err(e)) => {
-                let nid = req.node_id.clone();
-                let _ = blocking(&self.storage, move |s| {
-                    s.update_node_state(&nid, pacinet_core::NodeState::Error)
-                })
-                .await;
-                warn!(node_id = %req.node_id, error = %e, "Failed to connect to agent");
-                let resp = DeployPolicyResponse {
-                    success: false,
-                    message: format!("Failed to reach agent: {}", e),
-                    warnings: vec!["Policy stored locally but agent unreachable".to_string()],
-                };
-                (resp, DeploymentResult::AgentUnreachable)
-            }
-            Err(_) => {
-                let nid = req.node_id.clone();
-                let _ = blocking(&self.storage, move |s| {
-                    s.update_node_state(&nid, pacinet_core::NodeState::Error)
-                })
-                .await;
-                let timeout_secs = deploy_timeout.as_secs();
-                warn!(node_id = %req.node_id, "Agent deploy timed out after {}s", timeout_secs);
-                let resp = DeployPolicyResponse {
-                    success: false,
-                    message: format!("Agent communication timed out ({}s)", timeout_secs),
-                    warnings: vec!["Policy stored locally but agent timed out".to_string()],
-                };
-                (resp, DeploymentResult::Timeout)
-            }
-        };
-
-        // Record metrics
-        let duration = deploy_start.elapsed().as_secs_f64();
-        m::record_deploy(&deploy_result.to_string(), duration);
-
-        // Record deployment audit
-        let record = DeploymentRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            node_id,
-            policy_version: version,
-            policy_hash,
-            deployed_at: policy.deployed_at,
-            result: deploy_result,
-            message: response.message.clone(),
-        };
-        let _ = blocking(&self.storage, move |s| s.record_deployment(record)).await;
-
-        Ok(Response::new(response))
-    }
-
-    async fn forward_deploy_to_agent(
-        agent_addr: &str,
-        rules_yaml: &str,
-        options: Option<CompileOptions>,
-        tls_config: &Option<pacinet_core::tls::TlsConfig>,
-    ) -> Result<DeployRulesResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let mut client = if let Some(tls) = tls_config {
-            let client_tls = pacinet_core::tls::load_client_tls(tls)?;
-            let channel = tonic::transport::Channel::from_shared(agent_addr.to_string())?
-                .tls_config(client_tls)?
-                .connect()
-                .await?;
-            paci_net_agent_client::PaciNetAgentClient::new(channel)
-        } else {
-            paci_net_agent_client::PaciNetAgentClient::connect(agent_addr.to_string()).await?
-        };
-
-        let response = client
-            .deploy_rules(DeployRulesRequest {
-                rules_yaml: rules_yaml.to_string(),
-                options,
-            })
-            .await?;
-
-        Ok(response.into_inner())
+        Ok(Response::new(DeployPolicyResponse {
+            success: outcome.success,
+            message: outcome.message,
+            warnings: outcome.warnings,
+        }))
     }
 }
 
@@ -764,141 +911,23 @@ async fn deploy_single_node(
     let node_id = req.node_id.clone();
     blocking(storage, move |s| s.begin_deploy(&node_id)).await?;
 
-    let result = do_deploy_for_batch(storage, req, node, deploy_timeout, tls_config).await;
+    let options = req.options.unwrap_or_default();
+    let outcome = crate::deploy::deploy_to_node(
+        storage,
+        node,
+        &req.rules_yaml,
+        options,
+        deploy_timeout,
+        tls_config,
+    )
+    .await;
 
     // Release deploy guard
     storage.end_deploy(&req.node_id);
 
-    result
-}
-
-async fn do_deploy_for_batch(
-    storage: &Arc<dyn Storage>,
-    req: &DeployPolicyRequest,
-    node: &Node,
-    deploy_timeout: std::time::Duration,
-    tls_config: &Option<pacinet_core::tls::TlsConfig>,
-) -> Result<DeployPolicyResponse, Status> {
-    let policy_hash = pacinet_core::policy_hash(&req.rules_yaml);
-    let options = req.options.unwrap_or_default();
-
-    let policy = Policy {
-        node_id: req.node_id.clone(),
-        rules_yaml: req.rules_yaml.clone(),
-        policy_hash: policy_hash.clone(),
-        deployed_at: chrono::Utc::now(),
-        counters_enabled: options.counters,
-        rate_limit_enabled: options.rate_limit,
-        conntrack_enabled: options.conntrack,
-    };
-    let policy_clone = policy.clone();
-    let node_id = req.node_id.clone();
-    let version = blocking(storage, move |s| s.store_policy(policy_clone)).await?;
-
-    // Set Deploying state
-    let nid = req.node_id.clone();
-    let _ = blocking(storage, move |s| {
-        s.update_node_state(&nid, pacinet_core::NodeState::Deploying)
+    Ok(DeployPolicyResponse {
+        success: outcome.success,
+        message: outcome.message,
+        warnings: outcome.warnings,
     })
-    .await;
-
-    let scheme = if tls_config.is_some() {
-        "https"
-    } else {
-        "http"
-    };
-    let agent_addr = format!("{}://{}", scheme, node.agent_address);
-    debug!(node_id = %req.node_id, agent = %agent_addr, "Forwarding batch deploy to agent");
-
-    let agent_result = tokio::time::timeout(
-        deploy_timeout,
-        ManagementService::forward_deploy_to_agent(
-            &agent_addr,
-            &req.rules_yaml,
-            req.options,
-            tls_config,
-        ),
-    )
-    .await;
-
-    let (response, deploy_result) = match agent_result {
-        Ok(Ok(response)) => {
-            if response.success {
-                let nid = req.node_id.clone();
-                let _ = blocking(storage, move |s| {
-                    s.update_node_state(&nid, pacinet_core::NodeState::Active)
-                })
-                .await;
-                (
-                    DeployPolicyResponse {
-                        success: true,
-                        message: response.message,
-                        warnings: response.warnings,
-                    },
-                    DeploymentResult::Success,
-                )
-            } else {
-                let nid = req.node_id.clone();
-                let _ = blocking(storage, move |s| {
-                    s.update_node_state(&nid, pacinet_core::NodeState::Error)
-                })
-                .await;
-                (
-                    DeployPolicyResponse {
-                        success: false,
-                        message: response.message,
-                        warnings: response.warnings,
-                    },
-                    DeploymentResult::AgentFailure,
-                )
-            }
-        }
-        Ok(Err(e)) => {
-            let nid = req.node_id.clone();
-            let _ = blocking(storage, move |s| {
-                s.update_node_state(&nid, pacinet_core::NodeState::Error)
-            })
-            .await;
-            (
-                DeployPolicyResponse {
-                    success: false,
-                    message: format!("Failed to reach agent: {}", e),
-                    warnings: vec!["Policy stored locally but agent unreachable".to_string()],
-                },
-                DeploymentResult::AgentUnreachable,
-            )
-        }
-        Err(_) => {
-            let nid = req.node_id.clone();
-            let _ = blocking(storage, move |s| {
-                s.update_node_state(&nid, pacinet_core::NodeState::Error)
-            })
-            .await;
-            (
-                DeployPolicyResponse {
-                    success: false,
-                    message: format!(
-                        "Agent communication timed out ({}s)",
-                        deploy_timeout.as_secs()
-                    ),
-                    warnings: vec!["Policy stored locally but agent timed out".to_string()],
-                },
-                DeploymentResult::Timeout,
-            )
-        }
-    };
-
-    // Record deployment
-    let record = DeploymentRecord {
-        id: uuid::Uuid::new_v4().to_string(),
-        node_id,
-        policy_version: version,
-        policy_hash,
-        deployed_at: policy.deployed_at,
-        result: deploy_result,
-        message: response.message.clone(),
-    };
-    let _ = blocking(storage, move |s| s.record_deployment(record)).await;
-
-    Ok(response)
 }

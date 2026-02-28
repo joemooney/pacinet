@@ -5,6 +5,8 @@
 - **gRPC-based** architecture: controller (southbound + northbound), agent, CLI
 - **Node lifecycle**: registration, heartbeat, policy deployment, counter collection
 - **End-to-end deployment**: CLI → Controller → Agent → PacGate
+- **YAML-defined FSM engine**: operator-defined deployment state machines (canary, staged, rollback)
+- **FSM orchestration**: background evaluation loop, condition-driven transitions, timer transitions, manual advance
 - **PacGate integration**: agent invokes `pacgate` CLI as subprocess (YAML interface)
 - **PacGateBackend abstraction**: Real (subprocess) or Mock (for testing)
 - **Storage abstraction**: In-memory (default) or SQLite (persistent via `--db`)
@@ -35,7 +37,7 @@
 | Crate | Type | Purpose |
 |-------|------|---------|
 | `pacinet-proto` | lib | Generated gRPC/protobuf types |
-| `pacinet-core` | lib | Domain model, error types, Storage trait, TLS helpers, hash util |
+| `pacinet-core` | lib | Domain model, error types, Storage trait, TLS helpers, hash util, FSM types |
 | `pacinet-server` | lib+bin | Controller (port 50054) |
 | `pacinet-agent` | lib+bin | Node agent (port 50055) |
 | `pacinet-cli` | bin | Operator CLI (`pacinet`) |
@@ -43,7 +45,7 @@
 ### gRPC Services
 - **PaciNetController** (agent → controller): RegisterNode, Heartbeat, ReportCounters
 - **PaciNetAgent** (controller → agent): DeployRules, GetCounters, GetStatus
-- **PaciNetManagement** (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy
+- **PaciNetManagement** (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy, CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm
 
 ## Common Commands
 ```bash
@@ -77,6 +79,10 @@ make test-all                  # Run tests + clippy
 - **Prometheus metrics**: `metrics` + `metrics-exporter-prometheus` crates; separate HTTP endpoint on --metrics-port
 - **Unified hash**: `pacinet_core::policy_hash()` (SipHash) shared across server and agent
 - **Graceful shutdown**: tokio::signal::ctrl_c() + watch channel for heartbeat loop + serve_with_shutdown
+- **FSM definitions**: YAML-parsed via serde_yaml, validated for consistency (initial state exists, transition targets valid, terminal states have no transitions)
+- **FSM engine**: background eval loop (5s interval), condition evaluation (Simple/Counter/Compound), timer transitions, deploy action execution via shared deploy module
+- **FSM storage**: JSON blob storage in both MemoryStorage and SqliteStorage
+- **ActionDefinition as struct**: uses optional fields (deploy/rollback/alert) rather than enum due to serde_yaml 0.9 tag requirements
 - Proto types do NOT have serde derives (prost_types::Timestamp incompatibility)
 - Domain types in pacinet-core have serde derives for JSON serialization
 - Both server and agent expose lib targets for integration testing

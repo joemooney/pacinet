@@ -51,3 +51,18 @@ pub fn update_node_gauges(total: usize, by_state: &std::collections::HashMap<Str
 pub fn record_uptime(seconds: f64) {
     metrics::gauge!("pacinet_controller_uptime_seconds").set(seconds);
 }
+
+/// Record an FSM state transition.
+pub fn record_fsm_transition() {
+    metrics::counter!("pacinet_fsm_transitions_total").increment(1);
+}
+
+/// Record an FSM instance status change.
+pub fn record_fsm_instance_status(status: &str) {
+    metrics::counter!("pacinet_fsm_instances_total", "status" => status.to_string()).increment(1);
+}
+
+/// Update FSM running instances gauge.
+pub fn update_fsm_running_gauge(count: usize) {
+    metrics::gauge!("pacinet_fsm_instances_running").set(count as f64);
+}

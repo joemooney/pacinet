@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use pacinet_core::error::PaciNetError;
+use pacinet_core::fsm::{FsmDefinition, FsmInstance, FsmInstanceStatus, FsmKind};
 use pacinet_core::model::*;
 use pacinet_core::Storage;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +14,8 @@ pub struct MemoryStorage {
     policy_versions: RwLock<HashMap<String, Vec<PolicyVersion>>>,
     deployments: RwLock<Vec<DeploymentRecord>>,
     deploying: RwLock<HashSet<String>>,
+    fsm_definitions: RwLock<HashMap<String, FsmDefinition>>,
+    fsm_instances: RwLock<HashMap<String, FsmInstance>>,
 }
 
 impl Default for MemoryStorage {
@@ -24,6 +27,8 @@ impl Default for MemoryStorage {
             policy_versions: RwLock::new(HashMap::new()),
             deployments: RwLock::new(Vec::new()),
             deploying: RwLock::new(HashSet::new()),
+            fsm_definitions: RwLock::new(HashMap::new()),
+            fsm_instances: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -228,6 +233,74 @@ impl Storage for MemoryStorage {
             }
         }
         Ok((total, by_state, oldest))
+    }
+
+    // ---- FSM operations ----
+
+    fn store_fsm_definition(&self, def: FsmDefinition) -> Result<(), PaciNetError> {
+        self.fsm_definitions
+            .write()
+            .unwrap()
+            .insert(def.name.clone(), def);
+        Ok(())
+    }
+
+    fn get_fsm_definition(&self, name: &str) -> Result<Option<FsmDefinition>, PaciNetError> {
+        Ok(self.fsm_definitions.read().unwrap().get(name).cloned())
+    }
+
+    fn list_fsm_definitions(
+        &self,
+        kind: Option<FsmKind>,
+    ) -> Result<Vec<FsmDefinition>, PaciNetError> {
+        let defs = self.fsm_definitions.read().unwrap();
+        Ok(defs
+            .values()
+            .filter(|d| kind.as_ref().is_none_or(|k| &d.kind == k))
+            .cloned()
+            .collect())
+    }
+
+    fn delete_fsm_definition(&self, name: &str) -> Result<bool, PaciNetError> {
+        Ok(self.fsm_definitions.write().unwrap().remove(name).is_some())
+    }
+
+    fn store_fsm_instance(&self, instance: FsmInstance) -> Result<(), PaciNetError> {
+        self.fsm_instances
+            .write()
+            .unwrap()
+            .insert(instance.instance_id.clone(), instance);
+        Ok(())
+    }
+
+    fn get_fsm_instance(&self, id: &str) -> Result<Option<FsmInstance>, PaciNetError> {
+        Ok(self.fsm_instances.read().unwrap().get(id).cloned())
+    }
+
+    fn update_fsm_instance(&self, instance: FsmInstance) -> Result<(), PaciNetError> {
+        let mut instances = self.fsm_instances.write().unwrap();
+        if instances.contains_key(&instance.instance_id) {
+            instances.insert(instance.instance_id.clone(), instance);
+            Ok(())
+        } else {
+            Err(PaciNetError::Fsm(
+                pacinet_core::fsm::FsmError::InstanceNotFound(instance.instance_id),
+            ))
+        }
+    }
+
+    fn list_fsm_instances(
+        &self,
+        def_name: Option<&str>,
+        status: Option<FsmInstanceStatus>,
+    ) -> Result<Vec<FsmInstance>, PaciNetError> {
+        let instances = self.fsm_instances.read().unwrap();
+        Ok(instances
+            .values()
+            .filter(|i| def_name.is_none_or(|n| i.definition_name == n))
+            .filter(|i| status.as_ref().is_none_or(|s| &i.status == s))
+            .cloned()
+            .collect())
     }
 }
 

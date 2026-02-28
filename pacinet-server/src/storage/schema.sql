@@ -61,3 +61,24 @@ CREATE TABLE IF NOT EXISTS deployments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_deployments_node ON deployments(node_id, deployed_at DESC);
+
+-- Phase 5: FSM tables
+
+CREATE TABLE IF NOT EXISTS fsm_definitions (
+    name TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    definition_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fsm_instances (
+    instance_id TEXT PRIMARY KEY,
+    definition_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    instance_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fsm_instances_status ON fsm_instances(status);
+CREATE INDEX IF NOT EXISTS idx_fsm_instances_def ON fsm_instances(definition_name);

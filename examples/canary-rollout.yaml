@@ -1,0 +1,36 @@
+name: canary-rollout
+kind: deployment
+description: Canary then staged rollout with auto-rollback
+initial: canary
+states:
+  canary:
+    action:
+      deploy:
+        select: { label: { canary: "true" }, limit: 1 }
+    transitions:
+      - to: validate
+        when: { all_succeeded: true }
+      - to: rollback
+        when: { any_failed: true }
+  validate:
+    transitions:
+      - to: staged
+        after: 5m
+      - to: rollback
+        when: { manual: true }
+  staged:
+    action:
+      deploy:
+        select: { label: { env: prod } }
+        batch_percent: 25
+    transitions:
+      - to: complete
+        when: { all_succeeded: true }
+      - to: rollback
+        when: { any_failed: true }
+  rollback:
+    action:
+      rollback: { target: previous }
+    terminal: true
+  complete:
+    terminal: true

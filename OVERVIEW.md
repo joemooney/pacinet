@@ -47,13 +47,13 @@ PaciNet follows a classic SDN controller architecture:
 
 ### Key Components
 
-1. **pacinet-server** — The central controller. Receives agent registrations, stores node state (in-memory or SQLite), handles policy deployment, batch deploy, fleet status, policy history, rollback, and forwards deploy requests to agents. Includes stale node reaper, Prometheus metrics endpoint, and gRPC health service. Supports mTLS.
+1. **pacinet-server** — The central controller. Receives agent registrations, stores node state (in-memory or SQLite), handles policy deployment, batch deploy, fleet status, policy history, rollback, and forwards deploy requests to agents. Includes stale node reaper, FSM evaluation engine (background loop for YAML-defined deployment state machines), Prometheus metrics endpoint, and gRPC health service. Supports mTLS.
 
 2. **pacinet-agent** — Runs on each PacGate node. Registers with the controller on startup, sends periodic heartbeats with retry/backoff, handles rule deployment by invoking the `pacgate` CLI, auto-detects PacGate version, reports counters and CPU usage. Supports graceful shutdown and mTLS.
 
-3. **pacinet-cli** (`pacinet`) — Operator command-line tool. Connects to the controller to list nodes, deploy policies (single or batch), query counters, view fleet status, diff policies, view policy/deployment history, and rollback policies. Supports mTLS.
+3. **pacinet-cli** (`pacinet`) — Operator command-line tool. Connects to the controller to list nodes, deploy policies (single or batch), query counters, view fleet status, diff policies, view policy/deployment history, rollback policies, and manage FSM definitions and instances (create, start, advance, cancel). Supports mTLS.
 
-4. **pacinet-core** — Shared domain model (Node, Policy, PolicyVersion, DeploymentRecord, RuleCounter), error definitions, Storage trait for backend abstraction, TLS configuration helpers, and unified policy hash function.
+4. **pacinet-core** — Shared domain model (Node, Policy, PolicyVersion, DeploymentRecord, RuleCounter), error definitions, Storage trait for backend abstraction, TLS configuration helpers, unified policy hash function, and YAML-defined FSM types (FsmDefinition, FsmInstance, FsmContext, conditions, actions).
 
 5. **pacinet-proto** — Generated gRPC/protobuf types from `proto/pacinet.proto`.
 
@@ -100,13 +100,19 @@ Development certificates can be generated with `make gen-certs` (requires openss
 
 ## Current Status
 
-**Phase 4 complete** — security, metrics, rollback, and CI:
-- **mTLS**: optional mutual TLS on all gRPC channels
-- **Prometheus metrics**: node gauges, deploy counters/histograms, heartbeat tracking, uptime
-- **Policy history RPCs**: query version history and deployment audit trail via gRPC + CLI
-- **Policy rollback**: rollback to any previous policy version
-- **Graceful shutdown**: signal handling with connection draining on both server and agent
-- **Code quality**: unified hash function, CPU usage collection, consistent state naming
-- **SQLite tests**: 9 additional tests for SqliteStorage backend
-- **GitHub Actions CI**: check, clippy, test, fmt on every push/PR
-- 35 tests (7 core, 18 server storage [9 memory + 9 SQLite], 10 agent, 7 integration) all passing, clippy clean
+**Phase 5 complete** — YAML-defined FSM engine for deployment orchestration:
+- **FSM definitions**: YAML-parsed deployment state machines (canary, staged, rollback strategies)
+- **FSM engine**: background evaluation loop (5s interval) with condition-driven, timer, and manual transitions
+- **FSM actions**: deploy (with node selector, batch percent, compile options), rollback, alert (log-only)
+- **9 FSM RPCs**: CRUD for definitions + start/get/list/advance/cancel for instances
+- **CLI `fsm` subcommand**: create, list, show, delete definitions; start, status, instances, advance, cancel
+- **Shared deploy module**: refactored deploy logic reused by both ManagementService and FsmEngine
+- **FSM storage**: JSON blob storage in both MemoryStorage and SqliteStorage
+- **FSM metrics**: transition counter, instance status counter, running instances gauge
+- 68 tests (27 core, 18 server storage, 10 agent, 13 integration) all passing, clippy clean
+
+Previous phases:
+- Phase 4: mTLS security, Prometheus metrics, policy rollback, CI pipeline
+- Phase 3: Production resilience, persistence, fleet management, observability
+- Phase 2: End-to-end deployment flow and integration tests
+- Phase 1: Initial scaffold with 5 workspace crates

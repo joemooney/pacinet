@@ -1,3 +1,4 @@
+use crate::fsm::error::FsmError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -26,6 +27,9 @@ pub enum PaciNetError {
     #[error("concurrent deploy in progress for node: {0}")]
     ConcurrentDeploy(String),
 
+    #[error("FSM error: {0}")]
+    Fsm(#[from] FsmError),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -47,6 +51,18 @@ impl From<PaciNetError> for tonic::Status {
                 tonic::Status::failed_precondition(err.to_string())
             }
             PaciNetError::ConcurrentDeploy(_) => tonic::Status::aborted(err.to_string()),
+            PaciNetError::Fsm(e) => match e {
+                FsmError::InstanceNotFound(_) | FsmError::DefinitionNotFound(_) => {
+                    tonic::Status::not_found(err.to_string())
+                }
+                FsmError::AlreadyCompleted => {
+                    tonic::Status::failed_precondition(err.to_string())
+                }
+                FsmError::InvalidDefinition(_) | FsmError::YamlParse(_) => {
+                    tonic::Status::invalid_argument(err.to_string())
+                }
+                _ => tonic::Status::internal(err.to_string()),
+            },
             PaciNetError::Internal(_) => tonic::Status::internal(err.to_string()),
         }
     }
