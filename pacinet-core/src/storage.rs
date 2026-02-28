@@ -20,7 +20,8 @@ pub trait Storage: Send + Sync {
     fn get_node(&self, node_id: &str) -> Result<Option<Node>, PaciNetError>;
 
     /// List nodes, optionally filtered by labels.
-    fn list_nodes(&self, label_filter: &HashMap<String, String>) -> Result<Vec<Node>, PaciNetError>;
+    fn list_nodes(&self, label_filter: &HashMap<String, String>)
+        -> Result<Vec<Node>, PaciNetError>;
 
     /// Remove a node and its associated data. Returns true if the node existed.
     fn remove_node(&self, node_id: &str) -> Result<bool, PaciNetError>;
@@ -39,7 +40,8 @@ pub trait Storage: Send + Sync {
     // ---- Counter operations ----
 
     /// Store counters for a node (replaces previous).
-    fn store_counters(&self, node_id: &str, counters: Vec<RuleCounter>) -> Result<(), PaciNetError>;
+    fn store_counters(&self, node_id: &str, counters: Vec<RuleCounter>)
+        -> Result<(), PaciNetError>;
 
     /// Get counters for a node.
     fn get_counters(&self, node_id: &str) -> Result<Option<Vec<RuleCounter>>, PaciNetError>;

@@ -51,6 +51,11 @@ service PaciNetManagement {
   // Phase 3: Fleet management
   rpc BatchDeployPolicy(BatchDeployPolicyRequest) returns (BatchDeployPolicyResponse);
   rpc GetFleetStatus(GetFleetStatusRequest) returns (GetFleetStatusResponse);
+
+  // Phase 4: History, audit, rollback
+  rpc GetPolicyHistory(GetPolicyHistoryRequest) returns (GetPolicyHistoryResponse);
+  rpc GetDeploymentHistory(GetDeploymentHistoryRequest) returns (GetDeploymentHistoryResponse);
+  rpc RollbackPolicy(RollbackPolicyRequest) returns (RollbackPolicyResponse);
 }
 
 // ============================================================================
@@ -286,4 +291,55 @@ message FleetNodeSummary {
   uint64 uptime_seconds = 5;
   double last_heartbeat_age_seconds = 6;
   google.protobuf.Timestamp last_deploy_time = 7;
+}
+
+// ============================================================================
+// Phase 4: Policy history, deployment audit, rollback messages
+// ============================================================================
+
+message GetPolicyHistoryRequest {
+  string node_id = 1;
+  uint32 limit = 2;  // 0 = default (10)
+}
+
+message GetPolicyHistoryResponse {
+  repeated PolicyVersionInfo versions = 1;
+}
+
+message PolicyVersionInfo {
+  uint64 version = 1;
+  string node_id = 2;
+  string policy_hash = 3;
+  google.protobuf.Timestamp deployed_at = 4;
+  string rules_yaml = 5;
+}
+
+message GetDeploymentHistoryRequest {
+  string node_id = 1;
+  uint32 limit = 2;  // 0 = default (20)
+}
+
+message GetDeploymentHistoryResponse {
+  repeated DeploymentInfo deployments = 1;
+}
+
+message DeploymentInfo {
+  string id = 1;
+  string node_id = 2;
+  uint64 policy_version = 3;
+  string policy_hash = 4;
+  google.protobuf.Timestamp deployed_at = 5;
+  string result = 6;
+  string message = 7;
+}
+
+message RollbackPolicyRequest {
+  string node_id = 1;
+  uint64 target_version = 2;  // 0 = previous version
+}
+
+message RollbackPolicyResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 rolled_back_to_version = 3;
 }

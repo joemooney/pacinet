@@ -14,3 +14,11 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Generated certificates
+certs/
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm

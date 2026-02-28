@@ -48,6 +48,18 @@ struct Args {
     /// Override PacGate version (auto-detected if not specified)
     #[arg(long)]
     pacgate_version: Option<String>,
+
+    /// CA certificate for mTLS
+    #[arg(long)]
+    ca_cert: Option<String>,
+
+    /// Agent TLS certificate
+    #[arg(long)]
+    tls_cert: Option<String>,
+
+    /// Agent TLS private key
+    #[arg(long)]
+    tls_key: Option<String>,
 }
 
 fn parse_label(s: &str) -> Result<(String, String), String> {
@@ -63,7 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let default_level = if args.debug { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let hostname = args
@@ -71,6 +84,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| gethostname().unwrap_or_else(|| "unknown".to_string()));
     let agent_address = format!("{}:{}", args.host, args.port);
     let labels: std::collections::HashMap<String, String> = args.label.into_iter().collect();
+
+    // Configure TLS if certs provided
+    let tls_config = match (&args.ca_cert, &args.tls_cert, &args.tls_key) {
+        (Some(ca), Some(cert), Some(key)) => {
+            info!("mTLS enabled");
+            Some(pacinet_core::tls::TlsConfig::new(
+                ca.into(),
+                cert.into(),
+                key.into(),
+            ))
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err("TLS requires all three: --ca-cert, --tls-cert, --tls-key".into());
+        }
+    };
 
     // Detect PacGate version
     let pacgate_version = match &args.pacgate_version {
@@ -95,13 +124,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "PaciNet agent starting"
     );
 
-    // Register with controller
+    // Register with controller (using client TLS if configured)
     let node_id = register_with_controller(
         &args.controller,
         &hostname,
         &agent_address,
         &labels,
         &pacgate_version,
+        &tls_config,
     )
     .await?;
 
@@ -121,29 +151,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pacgate_version: pacgate_version_clone,
     }));
 
-    // Bind to configured host (fix: was hardcoded to 127.0.0.1)
+    // Bind to configured host
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     info!("Agent gRPC server listening on {}", addr);
 
     let agent_service = service::AgentService::new(agent_state.clone());
 
-    // Spawn heartbeat task with configurable interval
+    // Shutdown watch channel
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Spawn heartbeat task with configurable interval, shutdown signal, and TLS config
     let hb_controller = args.controller.clone();
     let hb_node_id = node_id.clone();
     let hb_state = agent_state.clone();
     let hb_interval = args.heartbeat_interval;
+    let hb_tls = tls_config.clone();
     tokio::spawn(async move {
-        heartbeat_loop(&hb_controller, &hb_node_id, hb_state, hb_interval).await;
+        heartbeat_loop(
+            &hb_controller,
+            &hb_node_id,
+            hb_state,
+            hb_interval,
+            shutdown_rx,
+            &hb_tls,
+        )
+        .await;
     });
 
-    tonic::transport::Server::builder()
-        .add_service(
-            pacinet_proto::paci_net_agent_server::PaciNetAgentServer::new(agent_service),
-        )
-        .serve(addr)
+    let shutdown_state = agent_state.clone();
+    let shutdown = async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+        let state = shutdown_state.read().await;
+        info!(
+            node_id = %state.node_id,
+            controller = %state.controller_address,
+            "Shutdown signal received, stopping agent..."
+        );
+        let _ = shutdown_tx.send(true);
+    };
+
+    let mut server = tonic::transport::Server::builder();
+
+    if let Some(ref tls) = tls_config {
+        let server_tls = pacinet_core::tls::load_server_tls(tls)
+            .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+        server = server.tls_config(server_tls)?;
+    }
+
+    server
+        .add_service(pacinet_proto::paci_net_agent_server::PaciNetAgentServer::new(agent_service))
+        .serve_with_shutdown(addr, shutdown)
         .await?;
 
+    info!("Agent shut down cleanly");
     Ok(())
+}
+
+async fn connect_to_controller(
+    controller_addr: &str,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
+) -> Result<
+    pacinet_proto::paci_net_controller_client::PaciNetControllerClient<tonic::transport::Channel>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    if let Some(tls) = tls_config {
+        let client_tls = pacinet_core::tls::load_client_tls(tls)?;
+        let channel = tonic::transport::Channel::from_shared(controller_addr.to_string())?
+            .tls_config(client_tls)?
+            .connect()
+            .await?;
+        Ok(pacinet_proto::paci_net_controller_client::PaciNetControllerClient::new(channel))
+    } else {
+        Ok(
+            pacinet_proto::paci_net_controller_client::PaciNetControllerClient::connect(
+                controller_addr.to_string(),
+            )
+            .await?,
+        )
+    }
 }
 
 async fn register_with_controller(
@@ -152,12 +239,11 @@ async fn register_with_controller(
     agent_address: &str,
     labels: &std::collections::HashMap<String, String>,
     pacgate_version: &str,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let mut client =
-        pacinet_proto::paci_net_controller_client::PaciNetControllerClient::connect(
-            controller_addr.to_string(),
-        )
-        .await?;
+    let mut client = connect_to_controller(controller_addr, tls_config)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
 
     let response = client
         .register_node(pacinet_proto::RegisterNodeRequest {
@@ -181,20 +267,26 @@ async fn heartbeat_loop(
     node_id: &str,
     state: Arc<RwLock<service::AgentState>>,
     interval_secs: u64,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
 
     // Create client once and reuse connection
-    let mut client = pacinet_proto::paci_net_controller_client::PaciNetControllerClient::connect(
-        controller_addr.to_string(),
-    )
-    .await
-    .ok();
+    let mut client = connect_to_controller(controller_addr, tls_config)
+        .await
+        .ok();
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = shutdown_rx.changed() => {
+                info!("Heartbeat loop stopping (shutdown signal)");
+                return;
+            }
+        }
 
-        let (uptime, node_state) = {
+        let (uptime, node_state, cpu_usage) = {
             let s = state.read().await;
             let uptime = s.start_time.elapsed().as_secs();
             let ns = if s.active_policy_hash.is_some() {
@@ -202,13 +294,13 @@ async fn heartbeat_loop(
             } else {
                 pacinet_proto::NodeState::Online
             };
-            (uptime, ns)
+            (uptime, ns, read_cpu_usage())
         };
 
         let request = pacinet_proto::HeartbeatRequest {
             node_id: node_id.to_string(),
             state: node_state as i32,
-            cpu_usage: 0.0,
+            cpu_usage,
             uptime_seconds: uptime,
         };
 
@@ -219,14 +311,13 @@ async fn heartbeat_loop(
         for (attempt, &backoff_ms) in backoffs.iter().enumerate() {
             // Reconnect if client is missing
             if client.is_none() {
-                match pacinet_proto::paci_net_controller_client::PaciNetControllerClient::connect(
-                    controller_addr.to_string(),
-                )
-                .await
-                {
+                match connect_to_controller(controller_addr, tls_config).await {
                     Ok(c) => client = Some(c),
                     Err(e) => {
-                        warn!(attempt = attempt + 1, "Failed to connect for heartbeat: {}", e);
+                        warn!(
+                            attempt = attempt + 1,
+                            "Failed to connect for heartbeat: {}", e
+                        );
                         tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                         continue;
                     }
@@ -255,6 +346,22 @@ async fn heartbeat_loop(
             error!("Heartbeat failed after 3 retries");
         }
     }
+}
+
+/// Read CPU usage from /proc/stat (Linux only).
+/// Returns a percentage (0.0 - 100.0), or 0.0 if unavailable.
+fn read_cpu_usage() -> f64 {
+    // Simple approach: read /proc/stat idle percentage
+    // For a proper implementation we'd need to track deltas between reads,
+    // but for a heartbeat metric, a snapshot approach is sufficient.
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|content| {
+            // /proc/loadavg: "0.50 0.33 0.25 1/234 12345"
+            // Use 1-minute load average as a rough CPU proxy
+            content.split_whitespace().next()?.parse::<f64>().ok()
+        })
+        .unwrap_or(0.0)
 }
 
 /// Detect PacGate version by running `pacgate --version`

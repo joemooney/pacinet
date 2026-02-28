@@ -129,7 +129,7 @@ Implement Phase 3: storage abstraction (Memory + SQLite), state machine validati
 - Updated lib.rs to export storage and config modules
 
 #### 7. Agent Fixes
-- Fixed bind address bug (line 96: used args.host instead of hardcoded "127.0.0.1")
+- Fixed bind address bug (used args.host instead of hardcoded "127.0.0.1")
 - Added --heartbeat-interval CLI flag (configurable, default 30s)
 - Connection reuse: create PaciNetControllerClient once, reconnect on failure
 - Retry with exponential backoff: 3 retries per heartbeat (500ms→1s→2s)
@@ -159,4 +159,105 @@ Implement Phase 3: storage abstraction (Memory + SQLite), state machine validati
 
 ### Git Operations
 - Committed Phase 3 changes
+- Pushed to GitHub
+
+## Session 4 — Security, Metrics, Rollback & CI (2026-02-27)
+
+### Prompt
+Implement Phase 4: mTLS security on all gRPC channels, Prometheus metrics, policy history & deployment audit RPCs, policy rollback, graceful shutdown, code quality fixes (unified hash, CPU usage, consistent state naming), SQLite storage tests, GitHub Actions CI, Makefile updates.
+
+### Actions Taken
+
+#### 1. Proto Changes
+- Added 3 new RPCs to PaciNetManagement service: GetPolicyHistory, GetDeploymentHistory, RollbackPolicy
+- Added 7 new message types: GetPolicyHistoryRequest/Response, PolicyVersionInfo, GetDeploymentHistoryRequest/Response, DeploymentInfo, RollbackPolicyRequest/Response
+
+#### 2. Core Modules
+- **hash.rs** (new): Unified `policy_hash()` function using SipHash, replacing duplicated `md5_hash()` and `hash_content()` across server and agent
+- **tls.rs** (new): `TlsConfig` struct, `load_server_tls()` and `load_client_tls()` helpers using tonic's built-in TLS (rustls-backed)
+- **lib.rs**: Exported `hash` and `tls` modules, added `pub use hash::policy_hash`
+
+#### 3. Code Quality Fixes
+- Removed `md5_hash()` from `pacinet-server/src/service.rs`, replaced with `pacinet_core::policy_hash()`
+- Removed `hash_content()` from `pacinet-agent/src/service.rs`, replaced with `pacinet_core::policy_hash()`
+- Removed `#[allow(dead_code)]` from AgentState — fields now used in shutdown handler
+- Fixed CLI `state_name()` to return lowercase strings matching storage conventions
+
+#### 4. Policy History & Rollback RPCs
+- Implemented `get_policy_history` in ManagementService — delegates to `storage.get_policy_history()`
+- Implemented `get_deployment_history` — delegates to `storage.get_deployments()`
+- Implemented `rollback_policy` — fetches target version's YAML, re-deploys through existing `do_deploy()` flow
+- CLI: added `policy history <node-id> [--limit N]` command
+- CLI: added `policy rollback <node-id> [--version N]` command
+- CLI: added `deploy history <node-id> [--limit N]` top-level command
+
+#### 5. SQLite Storage Tests
+- Added `#[cfg(test)] mod tests` to `sqlite.rs` with 9 tests mirroring MemoryStorage tests
+- Tests use in-memory SQLite (`:memory:`) for speed
+- All 18 storage tests pass (9 memory + 9 SQLite)
+
+#### 6. Prometheus Metrics
+- **metrics.rs** (new): `install_metrics()` starts PrometheusBuilder HTTP listener on configurable port
+- Metric functions: `record_deploy()`, `record_heartbeat()`, `record_heartbeat_missed()`, `record_batch_deploy()`, `update_node_gauges()`, `record_uptime()`
+- Instrumented: heartbeat handler, deploy flow (with timing histogram), batch deploy, stale node reaper
+- Server main: `--metrics-port` flag (default 9090, 0 to disable)
+- Reaper loop: updates uptime gauge and node count gauges on each tick
+
+#### 7. Graceful Shutdown
+- **Server**: `serve_with_shutdown` with `tokio::signal::ctrl_c()`, logs shutdown message
+- **Agent**: `tokio::sync::watch` channel signals heartbeat loop to stop, `tokio::select!` in heartbeat loop, `serve_with_shutdown` for gRPC server, shutdown handler reads and logs AgentState fields
+
+#### 8. mTLS on All Channels
+- **Server**: `--ca-cert`, `--tls-cert`, `--tls-key` flags; `Server::builder().tls_config()` when present; ManagementService carries `tls_config` for controller→agent push connections
+- **Agent**: `--ca-cert`, `--tls-cert`, `--tls-key` flags; `connect_to_controller()` helper with TLS support; agent gRPC server uses server TLS; heartbeat loop uses TLS for reconnections
+- **CLI**: `--ca-cert`, `--tls-cert`, `--tls-key` global flags; `connect()` function handles TLS channel construction
+- Agent address scheme switches http/https based on TLS config presence
+- Backward compatible: all TLS flags optional, plain HTTP when absent
+
+#### 9. CPU Usage Collection
+- Agent heartbeat reports CPU load via `read_cpu_usage()` reading `/proc/loadavg`
+- Returns 1-minute load average as proxy metric, falls back to 0.0
+
+#### 10. Dev Certificate Generation
+- **scripts/gen-certs.sh**: generates CA, server, agent, and CLI client certs using openssl
+- Outputs to configurable `certs/` directory
+- Development/testing only
+
+#### 11. GitHub Actions CI
+- **.github/workflows/ci.yml**: runs on push and pull_request
+- Steps: checkout, rust-toolchain (stable), rust-cache, cargo check, clippy (-D warnings), test, fmt check
+
+#### 12. Makefile Updates
+- Added `gen-certs` target (runs gen-certs.sh)
+- Added `run-server-tls` target (server with mTLS + SQLite + metrics)
+- Added `run-agent-tls` target (agent with mTLS)
+
+#### 13. Documentation Updates
+- Updated CLAUDE.md: added mTLS, metrics, graceful shutdown, CI features; updated architecture diagram; added new commands; updated design decisions
+- Updated OVERVIEW.md: added security section, observability section, updated technology stack, updated status to Phase 4
+- Updated REQUIREMENTS.md: added security (6), observability (8), graceful shutdown (9.4), CI/CD (9.6), policy rollback (2.5), new CLI commands, new gRPC services, metrics port
+- Updated PROMPT_HISTORY.md: added Session 4 with full details
+- Updated .gitignore: added certs/, *.db files
+
+#### 14. Dependency Changes
+- Workspace Cargo.toml: `tonic` features = ["tls"], `metrics = "0.24"`, `metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }`
+- pacinet-server: added `metrics`, `metrics-exporter-prometheus`
+
+### Errors Encountered & Fixed
+- **tonic TLS types not found**: needed `features = ["tls"]` on tonic in workspace Cargo.toml
+- **Box<dyn Error> vs Box<dyn Error + Send + Sync>**: tls.rs returns `Send + Sync`, main.rs callers use `.map_err()` conversion
+- **Clippy too_many_arguments**: handle_deploy had 8 args, added `#[allow]` attribute
+- **Clippy print_literal**: inlined literal strings into format patterns
+- **dead_code on AgentState fields**: resolved by reading fields in shutdown handler
+
+### Test Results
+- 35 tests total, all passing:
+  - 7 core tests (model + hash)
+  - 18 server storage tests (9 memory + 9 SQLite)
+  - 10 agent tests (5 pacgate + 5 service)
+  - 7 integration tests
+- cargo clippy --workspace -- -D warnings: clean
+
+### Git Operations
+- Committed Phase 4 changes
 - Pushed to GitHub

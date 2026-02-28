@@ -5,7 +5,6 @@ use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
-#[allow(dead_code)]
 pub struct AgentState {
     pub node_id: String,
     pub controller_address: String,
@@ -36,7 +35,10 @@ impl paci_net_agent_server::PaciNetAgent for AgentService {
         request: Request<DeployRulesRequest>,
     ) -> Result<Response<DeployRulesResponse>, Status> {
         let req = request.into_inner();
-        info!("Received deploy_rules request ({} bytes)", req.rules_yaml.len());
+        info!(
+            "Received deploy_rules request ({} bytes)",
+            req.rules_yaml.len()
+        );
 
         let options = req.options.unwrap_or_default();
 
@@ -45,7 +47,12 @@ impl paci_net_agent_server::PaciNetAgent for AgentService {
             let state = self.state.read().await;
             state
                 .pacgate
-                .compile(&req.rules_yaml, options.counters, options.rate_limit, options.conntrack)
+                .compile(
+                    &req.rules_yaml,
+                    options.counters,
+                    options.rate_limit,
+                    options.conntrack,
+                )
                 .await
         };
 
@@ -53,7 +60,7 @@ impl paci_net_agent_server::PaciNetAgent for AgentService {
             Ok(result) => {
                 if result.success {
                     // Update state on success
-                    let policy_hash = format!("{:x}", hash_content(&req.rules_yaml));
+                    let policy_hash = pacinet_core::policy_hash(&req.rules_yaml);
                     let mut state = self.state.write().await;
                     state.active_policy_hash = Some(policy_hash);
                     state.active_rules_yaml = Some(req.rules_yaml.clone());
@@ -113,12 +120,4 @@ impl paci_net_agent_server::PaciNetAgent for AgentService {
             uptime_seconds: uptime,
         }))
     }
-}
-
-fn hash_content(s: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
 }

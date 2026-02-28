@@ -54,7 +54,9 @@ impl PacGateBackend {
     ) -> Result<CompileResult> {
         match self {
             PacGateBackend::Real(runner) => {
-                runner.compile(rules_yaml, counters, rate_limit, conntrack).await
+                runner
+                    .compile(rules_yaml, counters, rate_limit, conntrack)
+                    .await
             }
             PacGateBackend::Mock { should_succeed } => {
                 if *should_succeed {
@@ -116,7 +118,9 @@ impl PacGateRunner {
 
         debug!(path = %tmp_file.display(), "Wrote rules to temp file");
 
-        let result = self.run_pacgate(&tmp_file, counters, rate_limit, conntrack).await;
+        let result = self
+            .run_pacgate(&tmp_file, counters, rate_limit, conntrack)
+            .await;
 
         // Clean up temp file
         let _ = tokio::fs::remove_file(&tmp_file).await;
@@ -132,9 +136,7 @@ impl PacGateRunner {
         conntrack: bool,
     ) -> Result<CompileResult> {
         let mut cmd = tokio::process::Command::new(&self.binary);
-        cmd.arg("compile")
-            .arg(rules_path)
-            .arg("--json");
+        cmd.arg("compile").arg(rules_path).arg("--json");
 
         if counters {
             cmd.arg("--counters");
@@ -157,16 +159,17 @@ impl PacGateRunner {
 
                 if output.status.success() {
                     // Try to parse JSON output
-                    let (rules_count, output_dir) = match serde_json::from_str::<PacGateOutput>(&stdout) {
-                        Ok(parsed) => {
-                            debug!(?parsed, "Parsed PacGate JSON output");
-                            (parsed.rules_count, parsed.output_dir)
-                        }
-                        Err(e) => {
-                            warn!("Failed to parse PacGate JSON output: {}", e);
-                            (None, None)
-                        }
-                    };
+                    let (rules_count, output_dir) =
+                        match serde_json::from_str::<PacGateOutput>(&stdout) {
+                            Ok(parsed) => {
+                                debug!(?parsed, "Parsed PacGate JSON output");
+                                (parsed.rules_count, parsed.output_dir)
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse PacGate JSON output: {}", e);
+                                (None, None)
+                            }
+                        };
 
                     Ok(CompileResult {
                         success: true,
@@ -246,8 +249,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_backend_success() {
-        let backend = PacGateBackend::Mock { should_succeed: true };
-        let result = backend.compile("rules: []", false, false, false).await.unwrap();
+        let backend = PacGateBackend::Mock {
+            should_succeed: true,
+        };
+        let result = backend
+            .compile("rules: []", false, false, false)
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.rules_count, Some(3));
         assert!(result.output_dir.is_some());
@@ -255,8 +263,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_backend_failure() {
-        let backend = PacGateBackend::Mock { should_succeed: false };
-        let result = backend.compile("rules: []", false, false, false).await.unwrap();
+        let backend = PacGateBackend::Mock {
+            should_succeed: false,
+        };
+        let result = backend
+            .compile("rules: []", false, false, false)
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.message.contains("failed"));
         assert_eq!(result.rules_count, None);

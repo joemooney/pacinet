@@ -10,28 +10,32 @@
 - **Storage abstraction**: In-memory (default) or SQLite (persistent via `--db`)
 - **Fleet management**: batch deploy by label, fleet status with enriched node data
 - **Production resilience**: configurable timeouts, retry with backoff, stale node detection
-- **Policy versioning**: full version history, deployment audit trail
+- **Policy versioning**: full version history, deployment audit trail, rollback
 - **State machine validation**: enforced valid transitions, concurrent deploy protection
+- **mTLS security**: optional mutual TLS on all gRPC channels (server, agent, CLI)
+- **Prometheus metrics**: operational metrics on configurable HTTP endpoint
+- **Graceful shutdown**: signal handling, connection draining, heartbeat loop cancellation
 - **Health checks**: gRPC health service via tonic-health
+- **CI pipeline**: GitHub Actions (check, clippy, test, fmt)
 
 ## Architecture
 ```
 ┌──────────┐    northbound    ┌────────────────┐    southbound    ┌──────────────┐
 │ CLI      │───────gRPC──────▶│ Controller     │◀───────gRPC──────│ Agent        │
-│ (pacinet)│                  │ (pacinet-server)│───────gRPC──────▶│ (per node)   │
-└──────────┘                  └────────────────┘                  └──────┬───────┘
-                                                                        │
-                                                                  ┌─────▼───────┐
-                                                                  │ PacGate CLI │
-                                                                  │ (subprocess)│
-                                                                  └─────────────┘
+│ (pacinet)│   (mTLS opt.)    │ (pacinet-server)│───────gRPC──────▶│ (per node)   │
+└──────────┘                  └───────┬────────┘   (mTLS opt.)    └──────┬───────┘
+                                      │                                  │
+                              ┌───────▼────────┐                  ┌─────▼───────┐
+                              │ Prometheus     │                  │ PacGate CLI │
+                              │ :9090/metrics  │                  │ (subprocess)│
+                              └────────────────┘                  └─────────────┘
 ```
 
 ### Workspace Crates
 | Crate | Type | Purpose |
 |-------|------|---------|
 | `pacinet-proto` | lib | Generated gRPC/protobuf types |
-| `pacinet-core` | lib | Domain model, error types, Storage trait |
+| `pacinet-core` | lib | Domain model, error types, Storage trait, TLS helpers, hash util |
 | `pacinet-server` | lib+bin | Controller (port 50054) |
 | `pacinet-agent` | lib+bin | Node agent (port 50055) |
 | `pacinet-cli` | bin | Operator CLI (`pacinet`) |
@@ -39,7 +43,7 @@
 ### gRPC Services
 - **PaciNetController** (agent → controller): RegisterNode, Heartbeat, ReportCounters
 - **PaciNetAgent** (controller → agent): DeployRules, GetCounters, GetStatus
-- **PaciNetManagement** (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus
+- **PaciNetManagement** (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy
 
 ## Common Commands
 ```bash
@@ -47,7 +51,10 @@ cargo build                    # Build all crates
 cargo test                     # Run all unit + integration tests
 make run-server                # Start controller on :50054 (in-memory)
 make run-server-sqlite         # Start controller on :50054 (SQLite)
-make run-agent                 # Start agent, connect to controller
+make run-server-tls            # Start with mTLS + SQLite + metrics
+make run-agent                 # Start agent, connect to controller (plain)
+make run-agent-tls             # Start agent with mTLS
+make gen-certs                 # Generate dev TLS certificates
 make node-list                 # List nodes via CLI
 make integration-test          # Run integration tests only
 make test-all                  # Run tests + clippy
@@ -66,10 +73,15 @@ make test-all                  # Run tests + clippy
 - **Stale node reaper**: background task marks nodes Offline after missed heartbeats
 - **Policy versioning**: every deploy creates a PolicyVersion record
 - **Deployment audit trail**: DeploymentRecord with result enum
+- **mTLS**: optional on all channels via --ca-cert/--tls-cert/--tls-key flags; backward compatible (plain HTTP when absent)
+- **Prometheus metrics**: `metrics` + `metrics-exporter-prometheus` crates; separate HTTP endpoint on --metrics-port
+- **Unified hash**: `pacinet_core::policy_hash()` (SipHash) shared across server and agent
+- **Graceful shutdown**: tokio::signal::ctrl_c() + watch channel for heartbeat loop + serve_with_shutdown
 - Proto types do NOT have serde derives (prost_types::Timestamp incompatibility)
 - Domain types in pacinet-core have serde derives for JSON serialization
 - Both server and agent expose lib targets for integration testing
 
 ## Port Assignments
-- Controller: 50054
-- Agent: 50055 (configurable per node)
+- Controller gRPC: 50054
+- Agent gRPC: 50055 (configurable per node)
+- Prometheus metrics: 9090 (configurable, 0 to disable)

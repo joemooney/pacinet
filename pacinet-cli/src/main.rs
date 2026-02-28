@@ -25,6 +25,18 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// CA certificate for mTLS
+    #[arg(long, global = true)]
+    ca_cert: Option<String>,
+
+    /// Client TLS certificate
+    #[arg(long, global = true)]
+    tls_cert: Option<String>,
+
+    /// Client TLS private key
+    #[arg(long, global = true)]
+    tls_key: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -72,6 +84,15 @@ enum Commands {
         #[arg(short, long, value_parser = parse_label)]
         label: Vec<(String, String)>,
     },
+    /// Show deployment history for a node
+    #[command(name = "deploy-history")]
+    DeployHistory {
+        /// Node ID
+        node_id: String,
+        /// Max entries to show
+        #[arg(long, default_value = "20")]
+        limit: u32,
+    },
     /// Show controller/fleet status
     Status {
         /// Filter by label (key=value)
@@ -116,6 +137,22 @@ enum PolicyCommands {
         /// Second node ID
         node_b: String,
     },
+    /// Show policy version history for a node
+    History {
+        /// Node ID
+        node_id: String,
+        /// Max entries to show
+        #[arg(long, default_value = "10")]
+        limit: u32,
+    },
+    /// Rollback to a previous policy version
+    Rollback {
+        /// Node ID
+        node_id: String,
+        /// Target version (default: previous version)
+        #[arg(long, default_value = "0")]
+        version: u64,
+    },
 }
 
 fn parse_label(s: &str) -> Result<(String, String), String> {
@@ -151,8 +188,17 @@ fn counter_to_json(c: &pacinet_proto::RuleCounter) -> serde_json::Value {
 
 fn state_name(state: i32) -> String {
     pacinet_proto::NodeState::try_from(state)
-        .map(|s| format!("{:?}", s))
-        .unwrap_or_else(|_| "unknown".to_string())
+        .map(|s| match s {
+            pacinet_proto::NodeState::Unspecified => "unknown",
+            pacinet_proto::NodeState::Registered => "registered",
+            pacinet_proto::NodeState::Online => "online",
+            pacinet_proto::NodeState::Deploying => "deploying",
+            pacinet_proto::NodeState::Active => "active",
+            pacinet_proto::NodeState::Error => "error",
+            pacinet_proto::NodeState::Offline => "offline",
+        })
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 fn format_heartbeat_age(age_seconds: f64) -> String {
@@ -172,8 +218,23 @@ async fn main() -> Result<()> {
     let level = if cli.debug { Level::DEBUG } else { Level::WARN };
     tracing_subscriber::fmt().with_max_level(level).init();
 
+    // Configure TLS if certs provided
+    let tls_config = match (&cli.ca_cert, &cli.tls_cert, &cli.tls_key) {
+        (Some(ca), Some(cert), Some(key)) => Some(pacinet_core::tls::TlsConfig::new(
+            ca.into(),
+            cert.into(),
+            key.into(),
+        )),
+        (None, None, None) => None,
+        _ => {
+            anyhow::bail!("TLS requires all three: --ca-cert, --tls-cert, --tls-key");
+        }
+    };
+
     match cli.command {
-        Commands::Node { action } => handle_node(action, &cli.server, cli.json).await?,
+        Commands::Node { action } => {
+            handle_node(action, &cli.server, cli.json, &tls_config).await?
+        }
         Commands::Deploy {
             rules_file,
             node,
@@ -190,16 +251,34 @@ async fn main() -> Result<()> {
                 counters,
                 rate_limit,
                 conntrack,
+                &tls_config,
             )
             .await?
         }
-        Commands::Policy { action } => handle_policy(action, &cli.server, cli.json).await?,
+        Commands::Policy { action } => {
+            handle_policy(action, &cli.server, cli.json, &tls_config).await?
+        }
+        Commands::DeployHistory { node_id, limit } => {
+            handle_deploy_history(&cli.server, &node_id, limit, cli.json, &tls_config).await?
+        }
         Commands::Counters {
             node_id,
             aggregate,
             label,
-        } => handle_counters(&cli.server, node_id, aggregate, label, cli.json).await?,
-        Commands::Status { label } => handle_status(&cli.server, label, cli.json).await?,
+        } => {
+            handle_counters(
+                &cli.server,
+                node_id,
+                aggregate,
+                label,
+                cli.json,
+                &tls_config,
+            )
+            .await?
+        }
+        Commands::Status { label } => {
+            handle_status(&cli.server, label, cli.json, &tls_config).await?
+        }
         Commands::Version => {
             println!("pacinet {}", env!("CARGO_PKG_VERSION"));
         }
@@ -208,14 +287,35 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn connect(server: &str) -> Result<PaciNetManagementClient<tonic::transport::Channel>> {
-    PaciNetManagementClient::connect(server.to_string())
-        .await
-        .context(format!("Failed to connect to controller at {}", server))
+async fn connect(
+    server: &str,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
+) -> Result<PaciNetManagementClient<tonic::transport::Channel>> {
+    if let Some(tls) = tls_config {
+        let client_tls = pacinet_core::tls::load_client_tls(tls)
+            .map_err(|e| anyhow::anyhow!("TLS config error: {}", e))?;
+        let channel = tonic::transport::Channel::from_shared(server.to_string())
+            .map_err(|e| anyhow::anyhow!("Invalid server URI: {}", e))?
+            .tls_config(client_tls)
+            .map_err(|e| anyhow::anyhow!("TLS config error: {}", e))?
+            .connect()
+            .await
+            .context(format!("Failed to connect to controller at {}", server))?;
+        Ok(PaciNetManagementClient::new(channel))
+    } else {
+        PaciNetManagementClient::connect(server.to_string())
+            .await
+            .context(format!("Failed to connect to controller at {}", server))
+    }
 }
 
-async fn handle_node(action: NodeCommands, server: &str, as_json: bool) -> Result<()> {
-    let mut client = connect(server).await?;
+async fn handle_node(
+    action: NodeCommands,
+    server: &str,
+    as_json: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
+) -> Result<()> {
+    let mut client = connect(server, tls_config).await?;
 
     match action {
         NodeCommands::List { label } => {
@@ -312,6 +412,7 @@ async fn handle_node(action: NodeCommands, server: &str, as_json: bool) -> Resul
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_deploy(
     server: &str,
     rules_file: &str,
@@ -320,11 +421,12 @@ async fn handle_deploy(
     counters: bool,
     rate_limit: bool,
     conntrack: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) -> Result<()> {
     let rules_yaml = std::fs::read_to_string(rules_file)
         .context(format!("Failed to read rules file: {}", rules_file))?;
 
-    let mut client = connect(server).await?;
+    let mut client = connect(server, tls_config).await?;
 
     let options = Some(pacinet_proto::CompileOptions {
         counters,
@@ -353,8 +455,7 @@ async fn handle_deploy(
         }
     } else {
         // Batch deploy by label
-        let label_filter: std::collections::HashMap<String, String> =
-            label.into_iter().collect();
+        let label_filter: std::collections::HashMap<String, String> = label.into_iter().collect();
 
         let response = client
             .batch_deploy_policy(pacinet_proto::BatchDeployPolicyRequest {
@@ -394,8 +495,13 @@ async fn handle_deploy(
     Ok(())
 }
 
-async fn handle_policy(action: PolicyCommands, server: &str, as_json: bool) -> Result<()> {
-    let mut client = connect(server).await?;
+async fn handle_policy(
+    action: PolicyCommands,
+    server: &str,
+    as_json: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
+) -> Result<()> {
+    let mut client = connect(server, tls_config).await?;
 
     match action {
         PolicyCommands::Show { node_id } => {
@@ -452,6 +558,134 @@ async fn handle_policy(action: PolicyCommands, server: &str, as_json: bool) -> R
                 }
             }
         }
+        PolicyCommands::History { node_id, limit } => {
+            let response = client
+                .get_policy_history(pacinet_proto::GetPolicyHistoryRequest {
+                    node_id: node_id.clone(),
+                    limit,
+                })
+                .await?
+                .into_inner();
+
+            if as_json {
+                let versions: Vec<_> = response
+                    .versions
+                    .iter()
+                    .map(|v| {
+                        json!({
+                            "version": v.version,
+                            "policy_hash": v.policy_hash,
+                            "deployed_at": v.deployed_at.as_ref().map(|t| t.seconds),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&versions)?);
+            } else if response.versions.is_empty() {
+                println!("No policy history for node {}", node_id);
+            } else {
+                println!("{:<8} {:<16} DEPLOYED AT", "VERSION", "HASH");
+                for v in &response.versions {
+                    let hash_short = if v.policy_hash.len() > 12 {
+                        &v.policy_hash[..12]
+                    } else {
+                        &v.policy_hash
+                    };
+                    let deployed = v
+                        .deployed_at
+                        .as_ref()
+                        .map(|t| {
+                            chrono::DateTime::from_timestamp(t.seconds, 0)
+                                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                                .unwrap_or_else(|| "?".to_string())
+                        })
+                        .unwrap_or_else(|| "-".to_string());
+                    println!("{:<8} {:<16} {}", v.version, hash_short, deployed);
+                }
+            }
+        }
+        PolicyCommands::Rollback { node_id, version } => {
+            let response = client
+                .rollback_policy(pacinet_proto::RollbackPolicyRequest {
+                    node_id: node_id.clone(),
+                    target_version: version,
+                })
+                .await?
+                .into_inner();
+
+            if response.success {
+                println!(
+                    "Rolled back node {} to version {}",
+                    node_id, response.rolled_back_to_version
+                );
+            } else {
+                eprintln!("Rollback failed: {}", response.message);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_deploy_history(
+    server: &str,
+    node_id: &str,
+    limit: u32,
+    as_json: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
+) -> Result<()> {
+    let mut client = connect(server, tls_config).await?;
+
+    let response = client
+        .get_deployment_history(pacinet_proto::GetDeploymentHistoryRequest {
+            node_id: node_id.to_string(),
+            limit,
+        })
+        .await?
+        .into_inner();
+
+    if as_json {
+        let deployments: Vec<_> = response
+            .deployments
+            .iter()
+            .map(|d| {
+                json!({
+                    "id": d.id,
+                    "policy_version": d.policy_version,
+                    "policy_hash": d.policy_hash,
+                    "result": d.result,
+                    "message": d.message,
+                    "deployed_at": d.deployed_at.as_ref().map(|t| t.seconds),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&deployments)?);
+    } else if response.deployments.is_empty() {
+        println!("No deployment history for node {}", node_id);
+    } else {
+        println!(
+            "{:<20} {:<8} {:<16} {:<12} MESSAGE",
+            "TIME", "VERSION", "HASH", "RESULT"
+        );
+        for d in &response.deployments {
+            let hash_short = if d.policy_hash.len() > 12 {
+                &d.policy_hash[..12]
+            } else {
+                &d.policy_hash
+            };
+            let deployed = d
+                .deployed_at
+                .as_ref()
+                .map(|t| {
+                    chrono::DateTime::from_timestamp(t.seconds, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                })
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "{:<20} {:<8} {:<16} {:<12} {}",
+                deployed, d.policy_version, hash_short, d.result, d.message
+            );
+        }
     }
 
     Ok(())
@@ -463,12 +697,12 @@ async fn handle_counters(
     aggregate: bool,
     label: Vec<(String, String)>,
     as_json: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) -> Result<()> {
-    let mut client = connect(server).await?;
+    let mut client = connect(server, tls_config).await?;
 
     if aggregate || node_id.is_none() {
-        let label_filter: std::collections::HashMap<String, String> =
-            label.into_iter().collect();
+        let label_filter: std::collections::HashMap<String, String> = label.into_iter().collect();
         let response = client
             .get_aggregate_counters(pacinet_proto::GetAggregateCountersRequest { label_filter })
             .await?
@@ -531,8 +765,9 @@ async fn handle_status(
     server: &str,
     label: Vec<(String, String)>,
     as_json: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) -> Result<()> {
-    match connect(server).await {
+    match connect(server, tls_config).await {
         Ok(mut client) => {
             let label_filter: std::collections::HashMap<String, String> =
                 label.into_iter().collect();

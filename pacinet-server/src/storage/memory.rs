@@ -45,7 +45,10 @@ impl Storage for MemoryStorage {
         Ok(self.nodes.read().unwrap().get(node_id).cloned())
     }
 
-    fn list_nodes(&self, label_filter: &HashMap<String, String>) -> Result<Vec<Node>, PaciNetError> {
+    fn list_nodes(
+        &self,
+        label_filter: &HashMap<String, String>,
+    ) -> Result<Vec<Node>, PaciNetError> {
         let nodes = self.nodes.read().unwrap();
         Ok(nodes
             .values()
@@ -99,7 +102,11 @@ impl Storage for MemoryStorage {
         }
     }
 
-    fn store_counters(&self, node_id: &str, counters: Vec<RuleCounter>) -> Result<(), PaciNetError> {
+    fn store_counters(
+        &self,
+        node_id: &str,
+        counters: Vec<RuleCounter>,
+    ) -> Result<(), PaciNetError> {
         self.counters
             .write()
             .unwrap()
@@ -142,13 +149,7 @@ impl Storage for MemoryStorage {
         let versions = self.policy_versions.read().unwrap();
         Ok(versions
             .get(node_id)
-            .map(|v| {
-                v.iter()
-                    .rev()
-                    .take(limit as usize)
-                    .cloned()
-                    .collect()
-            })
+            .map(|v| v.iter().rev().take(limit as usize).cloned().collect())
             .unwrap_or_default())
     }
 
@@ -195,10 +196,7 @@ impl Storage for MemoryStorage {
         self.deploying.write().unwrap().remove(node_id);
     }
 
-    fn mark_stale_nodes(
-        &self,
-        threshold: chrono::Duration,
-    ) -> Result<Vec<String>, PaciNetError> {
+    fn mark_stale_nodes(&self, threshold: chrono::Duration) -> Result<Vec<String>, PaciNetError> {
         let now = Utc::now();
         let mut nodes = self.nodes.write().unwrap();
         let mut stale = Vec::new();
@@ -301,9 +299,15 @@ mod tests {
     #[test]
     fn test_label_filtering() {
         let storage = MemoryStorage::new();
-        storage.register_node(make_node("prod-1", vec![("env", "prod"), ("region", "us")])).unwrap();
-        storage.register_node(make_node("dev-1", vec![("env", "dev"), ("region", "us")])).unwrap();
-        storage.register_node(make_node("prod-2", vec![("env", "prod"), ("region", "eu")])).unwrap();
+        storage
+            .register_node(make_node("prod-1", vec![("env", "prod"), ("region", "us")]))
+            .unwrap();
+        storage
+            .register_node(make_node("dev-1", vec![("env", "dev"), ("region", "us")]))
+            .unwrap();
+        storage
+            .register_node(make_node("prod-2", vec![("env", "prod"), ("region", "eu")]))
+            .unwrap();
 
         let filter: HashMap<String, String> = [("env".to_string(), "prod".to_string())].into();
         assert_eq!(storage.list_nodes(&filter).unwrap().len(), 2);
@@ -330,27 +334,41 @@ mod tests {
         let node_id = storage.register_node(node).unwrap();
 
         // Registered → Online: valid
-        assert!(storage.update_node_state(&node_id, NodeState::Online).unwrap());
+        assert!(storage
+            .update_node_state(&node_id, NodeState::Online)
+            .unwrap());
         let node = storage.get_node(&node_id).unwrap().unwrap();
         assert_eq!(node.state, NodeState::Online);
 
         // Online → Deploying: valid
-        assert!(storage.update_node_state(&node_id, NodeState::Deploying).unwrap());
+        assert!(storage
+            .update_node_state(&node_id, NodeState::Deploying)
+            .unwrap());
 
         // Deploying → Active: valid
-        assert!(storage.update_node_state(&node_id, NodeState::Active).unwrap());
+        assert!(storage
+            .update_node_state(&node_id, NodeState::Active)
+            .unwrap());
 
         // Active → Deploying: valid (redeploy)
-        assert!(storage.update_node_state(&node_id, NodeState::Deploying).unwrap());
+        assert!(storage
+            .update_node_state(&node_id, NodeState::Deploying)
+            .unwrap());
 
         // Deploying → Error: valid
-        assert!(storage.update_node_state(&node_id, NodeState::Error).unwrap());
+        assert!(storage
+            .update_node_state(&node_id, NodeState::Error)
+            .unwrap());
 
         // Error → Online: valid
-        assert!(storage.update_node_state(&node_id, NodeState::Online).unwrap());
+        assert!(storage
+            .update_node_state(&node_id, NodeState::Online)
+            .unwrap());
 
         // Non-existent node
-        assert!(!storage.update_node_state("nonexistent", NodeState::Online).unwrap());
+        assert!(!storage
+            .update_node_state("nonexistent", NodeState::Online)
+            .unwrap());
     }
 
     #[test]

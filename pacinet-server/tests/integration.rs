@@ -28,12 +28,12 @@ async fn start_controller(storage: Arc<dyn Storage>) -> u16 {
 
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(
-                paci_net_controller_server::PaciNetControllerServer::new(controller_service),
-            )
-            .add_service(
-                paci_net_management_server::PaciNetManagementServer::new(management_service),
-            )
+            .add_service(paci_net_controller_server::PaciNetControllerServer::new(
+                controller_service,
+            ))
+            .add_service(paci_net_management_server::PaciNetManagementServer::new(
+                management_service,
+            ))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .unwrap();
@@ -66,7 +66,9 @@ async fn start_agent(backend: PacGateBackend) -> (u16, Arc<RwLock<AgentState>>) 
 
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(paci_net_agent_server::PaciNetAgentServer::new(agent_service))
+            .add_service(paci_net_agent_server::PaciNetAgentServer::new(
+                agent_service,
+            ))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .unwrap();
@@ -111,8 +113,10 @@ async fn test_register_deploy_counters_flow() {
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Start agent with mock PacGate (success)
-    let (agent_port, agent_state) =
-        start_agent(PacGateBackend::Mock { should_succeed: true }).await;
+    let (agent_port, agent_state) = start_agent(PacGateBackend::Mock {
+        should_succeed: true,
+    })
+    .await;
     let agent_address = format!("127.0.0.1:{}", agent_port);
 
     // 1. Register node
@@ -144,8 +148,7 @@ async fn test_register_deploy_counters_flow() {
     let deploy_resp = mgmt_client
         .deploy_policy(DeployPolicyRequest {
             node_id: node_id.clone(),
-            rules_yaml: "rules:\n  - name: allow_ssh\n    action: allow\n    port: 22"
-                .to_string(),
+            rules_yaml: "rules:\n  - name: allow_ssh\n    action: allow\n    port: 22".to_string(),
             options: Some(CompileOptions {
                 counters: true,
                 rate_limit: false,
@@ -156,7 +159,11 @@ async fn test_register_deploy_counters_flow() {
         .unwrap()
         .into_inner();
 
-    assert!(deploy_resp.success, "Deploy failed: {}", deploy_resp.message);
+    assert!(
+        deploy_resp.success,
+        "Deploy failed: {}",
+        deploy_resp.message
+    );
 
     // 3. Verify node state is Active
     let node = storage.get_node(&node_id).unwrap().unwrap();
@@ -222,13 +229,7 @@ async fn test_deploy_to_unreachable_agent() {
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Register a node pointing to a port where nothing is listening
-    let node_id = register_node(
-        &ctrl_addr,
-        "dead-agent",
-        "127.0.0.1:19999",
-        HashMap::new(),
-    )
-    .await;
+    let node_id = register_node(&ctrl_addr, "dead-agent", "127.0.0.1:19999", HashMap::new()).await;
 
     // Transition to Online so deploy can work
     storage
@@ -277,8 +278,10 @@ async fn test_deploy_with_pacgate_failure() {
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Start agent with mock PacGate that fails
-    let (agent_port, _agent_state) =
-        start_agent(PacGateBackend::Mock { should_succeed: false }).await;
+    let (agent_port, _agent_state) = start_agent(PacGateBackend::Mock {
+        should_succeed: false,
+    })
+    .await;
     let agent_address = format!("127.0.0.1:{}", agent_port);
 
     // Register node
@@ -329,9 +332,18 @@ async fn test_batch_deploy_to_multiple_nodes() {
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Start 3 agents
-    let (agent_port_1, _) = start_agent(PacGateBackend::Mock { should_succeed: true }).await;
-    let (agent_port_2, _) = start_agent(PacGateBackend::Mock { should_succeed: true }).await;
-    let (agent_port_3, _) = start_agent(PacGateBackend::Mock { should_succeed: true }).await;
+    let (agent_port_1, _) = start_agent(PacGateBackend::Mock {
+        should_succeed: true,
+    })
+    .await;
+    let (agent_port_2, _) = start_agent(PacGateBackend::Mock {
+        should_succeed: true,
+    })
+    .await;
+    let (agent_port_3, _) = start_agent(PacGateBackend::Mock {
+        should_succeed: true,
+    })
+    .await;
 
     let labels = HashMap::from([("env".to_string(), "prod".to_string())]);
 
@@ -390,7 +402,11 @@ async fn test_batch_deploy_to_multiple_nodes() {
     assert_eq!(resp.failed, 0);
     assert_eq!(resp.results.len(), 3);
     for result in &resp.results {
-        assert!(result.success, "Node {} failed: {}", result.node_id, result.message);
+        assert!(
+            result.success,
+            "Node {} failed: {}",
+            result.node_id, result.message
+        );
     }
 }
 
@@ -402,7 +418,10 @@ async fn test_batch_deploy_partial_failure() {
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // One working agent, one dead
-    let (agent_port, _) = start_agent(PacGateBackend::Mock { should_succeed: true }).await;
+    let (agent_port, _) = start_agent(PacGateBackend::Mock {
+        should_succeed: true,
+    })
+    .await;
 
     let labels = HashMap::from([("env".to_string(), "staging".to_string())]);
 
@@ -413,13 +432,7 @@ async fn test_batch_deploy_partial_failure() {
         labels.clone(),
     )
     .await;
-    let nid2 = register_node(
-        &ctrl_addr,
-        "dead-node",
-        "127.0.0.1:19998",
-        labels.clone(),
-    )
-    .await;
+    let nid2 = register_node(&ctrl_addr, "dead-node", "127.0.0.1:19998", labels.clone()).await;
 
     for nid in [&nid1, &nid2] {
         storage
@@ -446,10 +459,18 @@ async fn test_batch_deploy_partial_failure() {
     assert_eq!(resp.succeeded, 1);
     assert_eq!(resp.failed, 1);
 
-    let good = resp.results.iter().find(|r| r.hostname == "good-node").unwrap();
+    let good = resp
+        .results
+        .iter()
+        .find(|r| r.hostname == "good-node")
+        .unwrap();
     assert!(good.success);
 
-    let bad = resp.results.iter().find(|r| r.hostname == "dead-node").unwrap();
+    let bad = resp
+        .results
+        .iter()
+        .find(|r| r.hostname == "dead-node")
+        .unwrap();
     assert!(!bad.success);
 }
 
@@ -463,7 +484,13 @@ async fn test_fleet_status() {
     // Register nodes
     let nid1 = register_node(&ctrl_addr, "online-node", "127.0.0.1:9001", HashMap::new()).await;
     let nid2 = register_node(&ctrl_addr, "error-node", "127.0.0.1:9002", HashMap::new()).await;
-    let _nid3 = register_node(&ctrl_addr, "registered-node", "127.0.0.1:9003", HashMap::new()).await;
+    let _nid3 = register_node(
+        &ctrl_addr,
+        "registered-node",
+        "127.0.0.1:9003",
+        HashMap::new(),
+    )
+    .await;
 
     // Transition nodes to various states
     storage
@@ -518,7 +545,9 @@ async fn test_stale_node_detection() {
     let node_id = storage.register_node(node).unwrap();
 
     // Mark stale with 2 minute threshold
-    let stale = storage.mark_stale_nodes(chrono::Duration::minutes(2)).unwrap();
+    let stale = storage
+        .mark_stale_nodes(chrono::Duration::minutes(2))
+        .unwrap();
     assert_eq!(stale.len(), 1);
     assert_eq!(stale[0], node_id);
 

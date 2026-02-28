@@ -45,6 +45,22 @@ struct Args {
     /// Number of missed heartbeats before marking node offline
     #[arg(long, default_value = "3")]
     heartbeat_miss_threshold: u32,
+
+    /// Prometheus metrics HTTP port (0 to disable)
+    #[arg(long, default_value = "9090")]
+    metrics_port: u16,
+
+    /// CA certificate for mTLS
+    #[arg(long)]
+    ca_cert: Option<String>,
+
+    /// Server TLS certificate
+    #[arg(long)]
+    tls_cert: Option<String>,
+
+    /// Server TLS private key
+    #[arg(long)]
+    tls_key: Option<String>,
 }
 
 #[tokio::main]
@@ -52,7 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let default_level = if args.debug { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config = ControllerConfig {
@@ -74,28 +91,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Start Prometheus metrics endpoint
+    if args.metrics_port > 0 {
+        pacinet_server::metrics::install_metrics(args.metrics_port)?;
+    }
+
+    // Configure TLS if certs provided
+    let tls_config = match (&args.ca_cert, &args.tls_cert, &args.tls_key) {
+        (Some(ca), Some(cert), Some(key)) => {
+            info!("mTLS enabled");
+            Some(pacinet_core::tls::TlsConfig::new(
+                ca.into(),
+                cert.into(),
+                key.into(),
+            ))
+        }
+        (None, None, None) => {
+            info!("Running without TLS (plaintext)");
+            None
+        }
+        _ => {
+            return Err("TLS requires all three: --ca-cert, --tls-cert, --tls-key".into());
+        }
+    };
+
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     info!("PaciNet controller starting on {}", addr);
 
     let controller_service = service::ControllerService::new(storage.clone());
-    let management_service = service::ManagementService::new(storage.clone(), config.clone());
+    let management_service = service::ManagementService::new(storage.clone(), config.clone())
+        .with_tls(tls_config.clone());
 
-    // Spawn stale node reaper
+    // Spawn stale node reaper + metrics updater
     let reaper_storage = storage.clone();
     let reaper_interval = config.heartbeat_expect_interval;
     let stale_threshold = config.stale_threshold();
+    let reaper_start = config.start_time;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(reaper_interval);
         loop {
             interval.tick().await;
+
+            // Update uptime metric
+            pacinet_server::metrics::record_uptime(reaper_start.elapsed().as_secs_f64());
+
+            // Update node gauge metrics
+            let storage_summary = reaper_storage.clone();
+            if let Ok(Ok((total, by_state, _))) =
+                tokio::task::spawn_blocking(move || storage_summary.status_summary()).await
+            {
+                pacinet_server::metrics::update_node_gauges(total, &by_state);
+            }
+
             let threshold = stale_threshold;
             let storage_clone = reaper_storage.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                storage_clone.mark_stale_nodes(threshold)
-            })
-            .await;
+            let result =
+                tokio::task::spawn_blocking(move || storage_clone.mark_stale_nodes(threshold))
+                    .await;
             match result {
                 Ok(Ok(stale_ids)) => {
+                    if !stale_ids.is_empty() {
+                        pacinet_server::metrics::record_heartbeat_missed(stale_ids.len() as u64);
+                    }
                     for id in &stale_ids {
                         warn!(node_id = %id, "Node marked offline (missed heartbeats)");
                     }
@@ -119,7 +176,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         >>()
         .await;
 
-    tonic::transport::Server::builder()
+    let shutdown = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+        info!("Shutdown signal received, draining connections...");
+    };
+
+    let mut server = tonic::transport::Server::builder();
+
+    if let Some(ref tls) = tls_config {
+        let server_tls = pacinet_core::tls::load_server_tls(tls)
+            .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+        server = server.tls_config(server_tls)?;
+    }
+
+    server
         .accept_http1(true)
         .layer(tonic_web::GrpcWebLayer::new())
         .add_service(health_service)
@@ -133,8 +205,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 management_service,
             ),
         )
-        .serve(addr)
+        .serve_with_shutdown(addr, shutdown)
         .await?;
 
+    info!("Controller shut down cleanly");
     Ok(())
 }

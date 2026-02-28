@@ -24,7 +24,7 @@ pacinet-core = { path = "pacinet-core" }
 tokio = { version = "1", features = ["full"] }
 
 # gRPC / Protobuf
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 tonic-web = "0.12"
 tonic-build = "0.12"
 prost = "0.13"
@@ -52,3 +52,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 tonic-health = "0.12"
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }
