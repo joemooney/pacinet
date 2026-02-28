@@ -20,6 +20,12 @@ pub enum PaciNetError {
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
 
+    #[error("invalid state transition from {from} to {to}")]
+    InvalidStateTransition { from: String, to: String },
+
+    #[error("concurrent deploy in progress for node: {0}")]
+    ConcurrentDeploy(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -37,6 +43,10 @@ impl From<PaciNetError> for tonic::Status {
             PaciNetError::PacGateError(_) => tonic::Status::internal(err.to_string()),
             PaciNetError::AgentUnreachable(_) => tonic::Status::unavailable(err.to_string()),
             PaciNetError::InvalidConfig(_) => tonic::Status::invalid_argument(err.to_string()),
+            PaciNetError::InvalidStateTransition { .. } => {
+                tonic::Status::failed_precondition(err.to_string())
+            }
+            PaciNetError::ConcurrentDeploy(_) => tonic::Status::aborted(err.to_string()),
             PaciNetError::Internal(_) => tonic::Status::internal(err.to_string()),
         }
     }

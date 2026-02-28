@@ -15,6 +15,7 @@ pub struct AgentState {
     pub deployed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub start_time: tokio::time::Instant,
     pub counters: Vec<RuleCounter>,
+    pub pacgate_version: String,
 }
 
 pub struct AgentService {
@@ -29,6 +30,7 @@ impl AgentService {
 
 #[tonic::async_trait]
 impl paci_net_agent_server::PaciNetAgent for AgentService {
+    #[tracing::instrument(skip(self, request))]
     async fn deploy_rules(
         &self,
         request: Request<DeployRulesRequest>,
@@ -76,6 +78,7 @@ impl paci_net_agent_server::PaciNetAgent for AgentService {
         }
     }
 
+    #[tracing::instrument(skip(self, _request))]
     async fn get_counters(
         &self,
         _request: Request<GetCountersRequest>,
@@ -90,6 +93,7 @@ impl paci_net_agent_server::PaciNetAgent for AgentService {
         }))
     }
 
+    #[tracing::instrument(skip(self, _request))]
     async fn get_status(
         &self,
         _request: Request<GetStatusRequest>,
@@ -104,7 +108,7 @@ impl paci_net_agent_server::PaciNetAgent for AgentService {
 
         Ok(Response::new(GetStatusResponse {
             state: node_state as i32,
-            pacgate_version: "0.1.0".to_string(),
+            pacgate_version: state.pacgate_version.clone(),
             active_policy_hash: state.active_policy_hash.clone().unwrap_or_default(),
             uptime_seconds: uptime,
         }))

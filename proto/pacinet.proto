@@ -47,6 +47,10 @@ service PaciNetManagement {
 
   rpc GetNodeCounters(GetNodeCountersRequest) returns (GetNodeCountersResponse);
   rpc GetAggregateCounters(GetAggregateCountersRequest) returns (GetAggregateCountersResponse);
+
+  // Phase 3: Fleet management
+  rpc BatchDeployPolicy(BatchDeployPolicyRequest) returns (BatchDeployPolicyResponse);
+  rpc GetFleetStatus(GetFleetStatusRequest) returns (GetFleetStatusResponse);
 }
 
 // ============================================================================
@@ -72,6 +76,10 @@ message NodeInfo {
   google.protobuf.Timestamp registered_at = 6;
   google.protobuf.Timestamp last_heartbeat = 7;
   string pacgate_version = 8;
+  // Phase 3: enriched fields
+  string policy_hash = 9;
+  uint64 uptime_seconds = 10;
+  double last_heartbeat_age_seconds = 11;
 }
 
 message RuleCounter {
@@ -229,4 +237,53 @@ message NodeCounterSet {
   string node_id = 1;
   repeated RuleCounter counters = 2;
   google.protobuf.Timestamp collected_at = 3;
+}
+
+// ============================================================================
+// Phase 3: Batch deploy messages
+// ============================================================================
+
+message BatchDeployPolicyRequest {
+  map<string, string> label_filter = 1;
+  string rules_yaml = 2;
+  CompileOptions options = 3;
+}
+
+message BatchDeployPolicyResponse {
+  uint32 total_nodes = 1;
+  uint32 succeeded = 2;
+  uint32 failed = 3;
+  repeated NodeDeployResult results = 4;
+}
+
+message NodeDeployResult {
+  string node_id = 1;
+  string hostname = 2;
+  bool success = 3;
+  string message = 4;
+  repeated string warnings = 5;
+}
+
+// ============================================================================
+// Phase 3: Fleet status messages
+// ============================================================================
+
+message GetFleetStatusRequest {
+  map<string, string> label_filter = 1;
+}
+
+message GetFleetStatusResponse {
+  uint32 total_nodes = 1;
+  map<string, uint32> nodes_by_state = 2;
+  repeated FleetNodeSummary nodes = 3;
+}
+
+message FleetNodeSummary {
+  string node_id = 1;
+  string hostname = 2;
+  NodeState state = 3;
+  string policy_hash = 4;
+  uint64 uptime_seconds = 5;
+  double last_heartbeat_age_seconds = 6;
+  google.protobuf.Timestamp last_deploy_time = 7;
 }

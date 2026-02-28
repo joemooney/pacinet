@@ -21,8 +21,8 @@ PaciNet follows a classic SDN controller architecture:
                     │  └──────────────┘  └────────────────┘  │
                     │          │                │              │
                     │     ┌────▼────────────────▼────┐        │
-                    │     │   Node Registry          │        │
-                    │     │   (in-memory HashMap)     │        │
+                    │     │   Storage Backend         │        │
+                    │     │   (Memory or SQLite)      │        │
                     │     └─────────────────────────┘         │
                     └─────────────────────────────────────────┘
                               ▲                    │
@@ -41,13 +41,13 @@ PaciNet follows a classic SDN controller architecture:
 
 ### Key Components
 
-1. **pacinet-server** — The central controller. Receives agent registrations, stores node state, handles policy deployment requests from the CLI, and forwards them to agents.
+1. **pacinet-server** — The central controller. Receives agent registrations, stores node state (in-memory or SQLite), handles policy deployment, batch deploy, fleet status, and forwards deploy requests to agents. Includes stale node reaper and gRPC health service.
 
-2. **pacinet-agent** — Runs on each PacGate node. Registers with the controller on startup, sends periodic heartbeats, handles rule deployment by invoking the `pacgate` CLI, and reports counters.
+2. **pacinet-agent** — Runs on each PacGate node. Registers with the controller on startup, sends periodic heartbeats with retry/backoff, handles rule deployment by invoking the `pacgate` CLI, auto-detects PacGate version, and reports counters.
 
-3. **pacinet-cli** (`pacinet`) — Operator command-line tool. Connects to the controller to list nodes, deploy policies, query counters, etc.
+3. **pacinet-cli** (`pacinet`) — Operator command-line tool. Connects to the controller to list nodes, deploy policies (single or batch), query counters, view fleet status, and diff policies between nodes.
 
-4. **pacinet-core** — Shared domain model (Node, Policy, RuleCounter types) and error definitions.
+4. **pacinet-core** — Shared domain model (Node, Policy, PolicyVersion, DeploymentRecord, RuleCounter), error definitions, and the Storage trait for backend abstraction.
 
 5. **pacinet-proto** — Generated gRPC/protobuf types from `proto/pacinet.proto`.
 
@@ -67,9 +67,21 @@ YAML is the interface contract between the two systems.
 - **tonic 0.12** / **prost 0.13** for gRPC
 - **tokio** async runtime
 - **clap 4** for CLI
-- **tracing** for structured logging
-- **In-memory storage** (no database for MVP)
+- **tracing** for structured logging with EnvFilter
+- **rusqlite** (bundled) for persistent storage
+- **tonic-health** for gRPC health checks
+- **similar** for policy diff
 
 ## Current Status
 
-**Phase 2 complete** — full end-to-end deployment flow works: CLI → Controller → Agent → PacGate. Controller forwards deploy requests to agents via gRPC with 30s timeout and graceful failure handling. Agent tracks deployment state, reports real uptime and status. PacGateBackend abstraction enables mock testing. Integration test suite validates happy path, unreachable agent, and PacGate failure scenarios. 14 tests (5 pacgate unit, 4 registry unit, 2 core, 3 integration) all passing.
+**Phase 3 complete** — production resilience, persistence, fleet management, and observability:
+- **Storage abstraction**: Storage trait with MemoryStorage and SqliteStorage backends
+- **State machine validation**: enforced valid transitions, concurrent deploy protection
+- **Policy versioning**: version history and deployment audit trail
+- **Fleet management**: batch deploy by label, fleet status with enriched node data
+- **Agent resilience**: bind address fix, connection reuse, heartbeat retry with exponential backoff, PacGate version detection
+- **Stale node reaper**: background task marks nodes Offline after missed heartbeats
+- **Configurable**: deploy timeout, heartbeat interval/threshold via CLI flags
+- **gRPC health service**: via tonic-health
+- **CLI enhancements**: batch deploy output, fleet status, policy diff, enriched node list
+- 26 tests (5 model+core, 5 pacgate, 9 storage, 7 integration) all passing, clippy clean

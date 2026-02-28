@@ -27,6 +27,8 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+rusqlite = { workspace = true }
+tonic-health = { workspace = true }
 
 [dev-dependencies]
 pacinet-agent = { path = "../pacinet-agent" }

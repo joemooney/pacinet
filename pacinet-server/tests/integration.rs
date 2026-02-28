@@ -7,21 +7,24 @@ use std::sync::Arc;
 
 use pacinet_agent::pacgate::PacGateBackend;
 use pacinet_agent::service::{AgentService, AgentState};
+use pacinet_core::Storage;
 use pacinet_proto::*;
-use pacinet_server::registry::NodeRegistry;
+use pacinet_server::config::ControllerConfig;
 use pacinet_server::service::{ControllerService, ManagementService};
+use pacinet_server::storage::MemoryStorage;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::TcpListenerStream;
 
 /// Start the controller (PaciNetController + PaciNetManagement) on an ephemeral port.
 /// Returns the port it's listening on.
-async fn start_controller(registry: Arc<NodeRegistry>) -> u16 {
+async fn start_controller(storage: Arc<dyn Storage>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    let controller_service = ControllerService::new(registry.clone());
-    let management_service = ManagementService::new(registry.clone());
+    let controller_service = ControllerService::new(storage.clone());
+    let config = ControllerConfig::default();
+    let management_service = ManagementService::new(storage.clone(), config);
 
     tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -56,6 +59,7 @@ async fn start_agent(backend: PacGateBackend) -> (u16, Arc<RwLock<AgentState>>) 
         deployed_at: None,
         start_time: tokio::time::Instant::now(),
         counters: vec![],
+        pacgate_version: "0.1.0".to_string(),
     }));
 
     let agent_service = AgentService::new(state.clone());
@@ -72,28 +76,23 @@ async fn start_agent(backend: PacGateBackend) -> (u16, Arc<RwLock<AgentState>>) 
     (port, state)
 }
 
-/// Full happy path: register node, deploy policy, push counters, query counters.
-#[tokio::test]
-async fn test_register_deploy_counters_flow() {
-    let registry = Arc::new(NodeRegistry::new());
-    let ctrl_port = start_controller(registry.clone()).await;
-    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
-
-    // Start agent with mock PacGate (success)
-    let (agent_port, agent_state) = start_agent(PacGateBackend::Mock { should_succeed: true }).await;
-    let agent_address = format!("127.0.0.1:{}", agent_port);
-
-    // 1. Register node
+/// Register a node via the controller gRPC and return the node_id.
+async fn register_node(
+    ctrl_addr: &str,
+    hostname: &str,
+    agent_address: &str,
+    labels: HashMap<String, String>,
+) -> String {
     let mut ctrl_client =
-        paci_net_controller_client::PaciNetControllerClient::connect(ctrl_addr.clone())
+        paci_net_controller_client::PaciNetControllerClient::connect(ctrl_addr.to_string())
             .await
             .unwrap();
 
     let reg_resp = ctrl_client
         .register_node(RegisterNodeRequest {
-            hostname: "test-node-1".to_string(),
-            agent_address: agent_address.clone(),
-            labels: HashMap::from([("env".to_string(), "test".to_string())]),
+            hostname: hostname.to_string(),
+            agent_address: agent_address.to_string(),
+            labels,
             pacgate_version: "0.1.0".to_string(),
         })
         .await
@@ -101,13 +100,40 @@ async fn test_register_deploy_counters_flow() {
         .into_inner();
 
     assert!(reg_resp.accepted);
-    let node_id = reg_resp.node_id;
+    reg_resp.node_id
+}
+
+/// Full happy path: register node, deploy policy, push counters, query counters.
+#[tokio::test]
+async fn test_register_deploy_counters_flow() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let ctrl_port = start_controller(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    // Start agent with mock PacGate (success)
+    let (agent_port, agent_state) =
+        start_agent(PacGateBackend::Mock { should_succeed: true }).await;
+    let agent_address = format!("127.0.0.1:{}", agent_port);
+
+    // 1. Register node
+    let node_id = register_node(
+        &ctrl_addr,
+        "test-node-1",
+        &agent_address,
+        HashMap::from([("env".to_string(), "test".to_string())]),
+    )
+    .await;
 
     // Update agent's node_id
     {
         let mut s = agent_state.write().await;
         s.node_id = node_id.clone();
     }
+
+    // Need to transition Registered → Online before deploy can go to Deploying
+    storage
+        .update_node_state(&node_id, pacinet_core::NodeState::Online)
+        .unwrap();
 
     // 2. Deploy policy via management API
     let mut mgmt_client =
@@ -118,7 +144,8 @@ async fn test_register_deploy_counters_flow() {
     let deploy_resp = mgmt_client
         .deploy_policy(DeployPolicyRequest {
             node_id: node_id.clone(),
-            rules_yaml: "rules:\n  - name: allow_ssh\n    action: allow\n    port: 22".to_string(),
+            rules_yaml: "rules:\n  - name: allow_ssh\n    action: allow\n    port: 22"
+                .to_string(),
             options: Some(CompileOptions {
                 counters: true,
                 rate_limit: false,
@@ -132,7 +159,7 @@ async fn test_register_deploy_counters_flow() {
     assert!(deploy_resp.success, "Deploy failed: {}", deploy_resp.message);
 
     // 3. Verify node state is Active
-    let node = registry.get_node(&node_id).unwrap();
+    let node = storage.get_node(&node_id).unwrap().unwrap();
     assert!(
         matches!(node.state, pacinet_core::NodeState::Active),
         "Expected Active, got {:?}",
@@ -147,13 +174,16 @@ async fn test_register_deploy_counters_flow() {
     }
 
     // 5. Push counters to controller
-    let counters = vec![
-        RuleCounter {
-            rule_name: "allow_ssh".to_string(),
-            match_count: 42,
-            byte_count: 3200,
-        },
-    ];
+    let mut ctrl_client =
+        paci_net_controller_client::PaciNetControllerClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+
+    let counters = vec![RuleCounter {
+        rule_name: "allow_ssh".to_string(),
+        match_count: 42,
+        byte_count: 3200,
+    }];
 
     let counter_resp = ctrl_client
         .report_counters(ReportCountersRequest {
@@ -187,29 +217,23 @@ async fn test_register_deploy_counters_flow() {
 /// Register node with dead agent address, deploy should fail gracefully (not panic).
 #[tokio::test]
 async fn test_deploy_to_unreachable_agent() {
-    let registry = Arc::new(NodeRegistry::new());
-    let ctrl_port = start_controller(registry.clone()).await;
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let ctrl_port = start_controller(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Register a node pointing to a port where nothing is listening
-    let mut ctrl_client =
-        paci_net_controller_client::PaciNetControllerClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let node_id = register_node(
+        &ctrl_addr,
+        "dead-agent",
+        "127.0.0.1:19999",
+        HashMap::new(),
+    )
+    .await;
 
-    let reg_resp = ctrl_client
-        .register_node(RegisterNodeRequest {
-            hostname: "dead-agent".to_string(),
-            agent_address: "127.0.0.1:19999".to_string(),
-            labels: HashMap::new(),
-            pacgate_version: "0.1.0".to_string(),
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    assert!(reg_resp.accepted);
-    let node_id = reg_resp.node_id;
+    // Transition to Online so deploy can work
+    storage
+        .update_node_state(&node_id, pacinet_core::NodeState::Online)
+        .unwrap();
 
     // Deploy should fail gracefully
     let mut mgmt_client =
@@ -237,7 +261,7 @@ async fn test_deploy_to_unreachable_agent() {
     );
 
     // Node state should be Error
-    let node = registry.get_node(&node_id).unwrap();
+    let node = storage.get_node(&node_id).unwrap().unwrap();
     assert!(
         matches!(node.state, pacinet_core::NodeState::Error),
         "Expected Error, got {:?}",
@@ -248,8 +272,8 @@ async fn test_deploy_to_unreachable_agent() {
 /// Mock PacGate returns failure — verify deploy returns success=false, node state = Error.
 #[tokio::test]
 async fn test_deploy_with_pacgate_failure() {
-    let registry = Arc::new(NodeRegistry::new());
-    let ctrl_port = start_controller(registry.clone()).await;
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let ctrl_port = start_controller(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Start agent with mock PacGate that fails
@@ -258,23 +282,12 @@ async fn test_deploy_with_pacgate_failure() {
     let agent_address = format!("127.0.0.1:{}", agent_port);
 
     // Register node
-    let mut ctrl_client =
-        paci_net_controller_client::PaciNetControllerClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let node_id = register_node(&ctrl_addr, "fail-agent", &agent_address, HashMap::new()).await;
 
-    let reg_resp = ctrl_client
-        .register_node(RegisterNodeRequest {
-            hostname: "fail-agent".to_string(),
-            agent_address,
-            labels: HashMap::new(),
-            pacgate_version: "0.1.0".to_string(),
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    let node_id = reg_resp.node_id;
+    // Transition to Online
+    storage
+        .update_node_state(&node_id, pacinet_core::NodeState::Online)
+        .unwrap();
 
     // Deploy — agent accepts the call but PacGate compile fails
     let mut mgmt_client =
@@ -300,10 +313,215 @@ async fn test_deploy_with_pacgate_failure() {
     );
 
     // Node state should be Error
-    let node = registry.get_node(&node_id).unwrap();
+    let node = storage.get_node(&node_id).unwrap().unwrap();
     assert!(
         matches!(node.state, pacinet_core::NodeState::Error),
         "Expected Error, got {:?}",
         node.state
     );
+}
+
+/// Batch deploy to multiple nodes — all succeed.
+#[tokio::test]
+async fn test_batch_deploy_to_multiple_nodes() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let ctrl_port = start_controller(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    // Start 3 agents
+    let (agent_port_1, _) = start_agent(PacGateBackend::Mock { should_succeed: true }).await;
+    let (agent_port_2, _) = start_agent(PacGateBackend::Mock { should_succeed: true }).await;
+    let (agent_port_3, _) = start_agent(PacGateBackend::Mock { should_succeed: true }).await;
+
+    let labels = HashMap::from([("env".to_string(), "prod".to_string())]);
+
+    // Register 3 nodes
+    let nid1 = register_node(
+        &ctrl_addr,
+        "node-1",
+        &format!("127.0.0.1:{}", agent_port_1),
+        labels.clone(),
+    )
+    .await;
+    let nid2 = register_node(
+        &ctrl_addr,
+        "node-2",
+        &format!("127.0.0.1:{}", agent_port_2),
+        labels.clone(),
+    )
+    .await;
+    let nid3 = register_node(
+        &ctrl_addr,
+        "node-3",
+        &format!("127.0.0.1:{}", agent_port_3),
+        labels.clone(),
+    )
+    .await;
+
+    // Transition all to Online
+    for nid in [&nid1, &nid2, &nid3] {
+        storage
+            .update_node_state(nid, pacinet_core::NodeState::Online)
+            .unwrap();
+    }
+
+    // Batch deploy
+    let mut mgmt_client =
+        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+
+    let resp = mgmt_client
+        .batch_deploy_policy(BatchDeployPolicyRequest {
+            label_filter: HashMap::from([("env".to_string(), "prod".to_string())]),
+            rules_yaml: "rules:\n  - name: block_all\n    action: deny".to_string(),
+            options: Some(CompileOptions {
+                counters: true,
+                rate_limit: false,
+                conntrack: false,
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.total_nodes, 3);
+    assert_eq!(resp.succeeded, 3);
+    assert_eq!(resp.failed, 0);
+    assert_eq!(resp.results.len(), 3);
+    for result in &resp.results {
+        assert!(result.success, "Node {} failed: {}", result.node_id, result.message);
+    }
+}
+
+/// Batch deploy with partial failure — one dead agent.
+#[tokio::test]
+async fn test_batch_deploy_partial_failure() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let ctrl_port = start_controller(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    // One working agent, one dead
+    let (agent_port, _) = start_agent(PacGateBackend::Mock { should_succeed: true }).await;
+
+    let labels = HashMap::from([("env".to_string(), "staging".to_string())]);
+
+    let nid1 = register_node(
+        &ctrl_addr,
+        "good-node",
+        &format!("127.0.0.1:{}", agent_port),
+        labels.clone(),
+    )
+    .await;
+    let nid2 = register_node(
+        &ctrl_addr,
+        "dead-node",
+        "127.0.0.1:19998",
+        labels.clone(),
+    )
+    .await;
+
+    for nid in [&nid1, &nid2] {
+        storage
+            .update_node_state(nid, pacinet_core::NodeState::Online)
+            .unwrap();
+    }
+
+    let mut mgmt_client =
+        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+
+    let resp = mgmt_client
+        .batch_deploy_policy(BatchDeployPolicyRequest {
+            label_filter: HashMap::from([("env".to_string(), "staging".to_string())]),
+            rules_yaml: "rules: []".to_string(),
+            options: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.total_nodes, 2);
+    assert_eq!(resp.succeeded, 1);
+    assert_eq!(resp.failed, 1);
+
+    let good = resp.results.iter().find(|r| r.hostname == "good-node").unwrap();
+    assert!(good.success);
+
+    let bad = resp.results.iter().find(|r| r.hostname == "dead-node").unwrap();
+    assert!(!bad.success);
+}
+
+/// Fleet status shows node counts by state and enriched summaries.
+#[tokio::test]
+async fn test_fleet_status() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let ctrl_port = start_controller(storage.clone()).await;
+    let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
+
+    // Register nodes
+    let nid1 = register_node(&ctrl_addr, "online-node", "127.0.0.1:9001", HashMap::new()).await;
+    let nid2 = register_node(&ctrl_addr, "error-node", "127.0.0.1:9002", HashMap::new()).await;
+    let _nid3 = register_node(&ctrl_addr, "registered-node", "127.0.0.1:9003", HashMap::new()).await;
+
+    // Transition nodes to various states
+    storage
+        .update_node_state(&nid1, pacinet_core::NodeState::Online)
+        .unwrap();
+    storage
+        .update_node_state(&nid2, pacinet_core::NodeState::Online)
+        .unwrap();
+    storage
+        .update_node_state(&nid2, pacinet_core::NodeState::Error)
+        .unwrap();
+
+    let mut mgmt_client =
+        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+            .await
+            .unwrap();
+
+    let resp = mgmt_client
+        .get_fleet_status(GetFleetStatusRequest {
+            label_filter: HashMap::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(resp.total_nodes, 3);
+    assert_eq!(resp.nodes.len(), 3);
+
+    // Check nodes_by_state
+    let online_count = resp.nodes_by_state.get("online").copied().unwrap_or(0);
+    let error_count = resp.nodes_by_state.get("error").copied().unwrap_or(0);
+    let registered_count = resp.nodes_by_state.get("registered").copied().unwrap_or(0);
+    assert_eq!(online_count, 1);
+    assert_eq!(error_count, 1);
+    assert_eq!(registered_count, 1);
+}
+
+/// Stale node detection — node goes offline after missed heartbeats.
+#[tokio::test]
+async fn test_stale_node_detection() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+
+    // Register node directly and set heartbeat to 5 minutes ago
+    let mut node = pacinet_core::Node::new(
+        "stale-node".to_string(),
+        "127.0.0.1:9999".to_string(),
+        HashMap::new(),
+        "0.1.0".to_string(),
+    );
+    node.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(5);
+    node.state = pacinet_core::NodeState::Online;
+    let node_id = storage.register_node(node).unwrap();
+
+    // Mark stale with 2 minute threshold
+    let stale = storage.mark_stale_nodes(chrono::Duration::minutes(2)).unwrap();
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0], node_id);
+
+    let node = storage.get_node(&node_id).unwrap().unwrap();
+    assert_eq!(node.state, pacinet_core::NodeState::Offline);
 }

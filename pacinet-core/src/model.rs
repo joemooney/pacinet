@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 /// State of a PacGate node in the network
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum NodeState {
     Registered,
     Online,
@@ -11,6 +12,25 @@ pub enum NodeState {
     Active,
     Error,
     Offline,
+}
+
+impl NodeState {
+    /// Returns the set of valid target states for this state.
+    pub fn valid_transitions(&self) -> &[NodeState] {
+        match self {
+            NodeState::Registered => &[NodeState::Online, NodeState::Offline],
+            NodeState::Online => &[NodeState::Deploying, NodeState::Error, NodeState::Offline],
+            NodeState::Deploying => &[NodeState::Active, NodeState::Error, NodeState::Offline],
+            NodeState::Active => &[NodeState::Deploying, NodeState::Error, NodeState::Offline],
+            NodeState::Error => &[NodeState::Online, NodeState::Deploying, NodeState::Offline],
+            NodeState::Offline => &[NodeState::Online],
+        }
+    }
+
+    /// Check if transitioning to `target` is valid.
+    pub fn can_transition_to(&self, target: &NodeState) -> bool {
+        self.valid_transitions().contains(target)
+    }
 }
 
 impl std::fmt::Display for NodeState {
@@ -22,6 +42,22 @@ impl std::fmt::Display for NodeState {
             NodeState::Active => write!(f, "active"),
             NodeState::Error => write!(f, "error"),
             NodeState::Offline => write!(f, "offline"),
+        }
+    }
+}
+
+impl FromStr for NodeState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "registered" => Ok(NodeState::Registered),
+            "online" => Ok(NodeState::Online),
+            "deploying" => Ok(NodeState::Deploying),
+            "active" => Ok(NodeState::Active),
+            "error" => Ok(NodeState::Error),
+            "offline" => Ok(NodeState::Offline),
+            _ => Err(format!("unknown node state: {}", s)),
         }
     }
 }
@@ -64,6 +100,7 @@ pub struct Node {
     pub registered_at: DateTime<Utc>,
     pub last_heartbeat: DateTime<Utc>,
     pub pacgate_version: String,
+    pub uptime_seconds: u64,
 }
 
 impl Node {
@@ -83,6 +120,7 @@ impl Node {
             registered_at: now,
             last_heartbeat: now,
             pacgate_version,
+            uptime_seconds: 0,
         }
     }
 }
@@ -97,6 +135,65 @@ pub struct Policy {
     pub counters_enabled: bool,
     pub rate_limit_enabled: bool,
     pub conntrack_enabled: bool,
+}
+
+/// Versioned snapshot of a policy deployment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyVersion {
+    pub version: u64,
+    pub node_id: String,
+    pub rules_yaml: String,
+    pub policy_hash: String,
+    pub deployed_at: DateTime<Utc>,
+    pub counters_enabled: bool,
+    pub rate_limit_enabled: bool,
+    pub conntrack_enabled: bool,
+}
+
+/// Result of a deployment attempt
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeploymentResult {
+    Success,
+    AgentFailure,
+    AgentUnreachable,
+    Timeout,
+}
+
+impl std::fmt::Display for DeploymentResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeploymentResult::Success => write!(f, "success"),
+            DeploymentResult::AgentFailure => write!(f, "agent_failure"),
+            DeploymentResult::AgentUnreachable => write!(f, "agent_unreachable"),
+            DeploymentResult::Timeout => write!(f, "timeout"),
+        }
+    }
+}
+
+impl FromStr for DeploymentResult {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "success" => Ok(DeploymentResult::Success),
+            "agent_failure" => Ok(DeploymentResult::AgentFailure),
+            "agent_unreachable" => Ok(DeploymentResult::AgentUnreachable),
+            "timeout" => Ok(DeploymentResult::Timeout),
+            _ => Err(format!("unknown deployment result: {}", s)),
+        }
+    }
+}
+
+/// Audit trail for a deployment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentRecord {
+    pub id: String,
+    pub node_id: String,
+    pub policy_version: u64,
+    pub policy_hash: String,
+    pub deployed_at: DateTime<Utc>,
+    pub result: DeploymentResult,
+    pub message: String,
 }
 
 /// Counter data from a rule match
@@ -142,11 +239,53 @@ mod tests {
         assert_eq!(node.hostname, "node-1");
         assert_eq!(node.state, NodeState::Registered);
         assert!(!node.node_id.is_empty());
+        assert_eq!(node.uptime_seconds, 0);
     }
 
     #[test]
     fn test_node_state_display() {
         assert_eq!(NodeState::Active.to_string(), "active");
         assert_eq!(NodeState::Offline.to_string(), "offline");
+    }
+
+    #[test]
+    fn test_node_state_fromstr() {
+        assert_eq!(NodeState::from_str("active").unwrap(), NodeState::Active);
+        assert_eq!(NodeState::from_str("ONLINE").unwrap(), NodeState::Online);
+        assert!(NodeState::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_valid_state_transitions() {
+        // Registered → Online: valid
+        assert!(NodeState::Registered.can_transition_to(&NodeState::Online));
+        // Registered → Active: invalid
+        assert!(!NodeState::Registered.can_transition_to(&NodeState::Active));
+        // Online → Deploying: valid
+        assert!(NodeState::Online.can_transition_to(&NodeState::Deploying));
+        // Deploying → Active: valid
+        assert!(NodeState::Deploying.can_transition_to(&NodeState::Active));
+        // Active → Deploying: valid (redeploy)
+        assert!(NodeState::Active.can_transition_to(&NodeState::Deploying));
+        // Error → Online: valid (recovery)
+        assert!(NodeState::Error.can_transition_to(&NodeState::Online));
+        // Offline → Online: valid
+        assert!(NodeState::Offline.can_transition_to(&NodeState::Online));
+        // Offline → Active: invalid
+        assert!(!NodeState::Offline.can_transition_to(&NodeState::Active));
+    }
+
+    #[test]
+    fn test_deployment_result_roundtrip() {
+        for result in &[
+            DeploymentResult::Success,
+            DeploymentResult::AgentFailure,
+            DeploymentResult::AgentUnreachable,
+            DeploymentResult::Timeout,
+        ] {
+            let s = result.to_string();
+            let parsed = DeploymentResult::from_str(&s).unwrap();
+            assert_eq!(result, &parsed);
+        }
     }
 }

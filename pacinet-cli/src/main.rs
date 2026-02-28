@@ -36,12 +36,16 @@ enum Commands {
         #[command(subcommand)]
         action: NodeCommands,
     },
-    /// Deploy rules to a node
+    /// Deploy rules to a node or nodes matching labels
     Deploy {
-        /// Target node ID
-        node_id: String,
         /// Path to rules YAML file
         rules_file: String,
+        /// Target node ID (for single-node deploy)
+        #[arg(long)]
+        node: Option<String>,
+        /// Filter by label for batch deploy (key=value)
+        #[arg(short, long, value_parser = parse_label)]
+        label: Vec<(String, String)>,
         /// Enable counters
         #[arg(long)]
         counters: bool,
@@ -68,8 +72,12 @@ enum Commands {
         #[arg(short, long, value_parser = parse_label)]
         label: Vec<(String, String)>,
     },
-    /// Show controller status
-    Status,
+    /// Show controller/fleet status
+    Status {
+        /// Filter by label (key=value)
+        #[arg(short, long, value_parser = parse_label)]
+        label: Vec<(String, String)>,
+    },
     /// Show version
     Version,
 }
@@ -101,6 +109,13 @@ enum PolicyCommands {
         /// Node ID
         node_id: String,
     },
+    /// Show unified diff between policies of two nodes
+    Diff {
+        /// First node ID
+        node_a: String,
+        /// Second node ID
+        node_b: String,
+    },
 }
 
 fn parse_label(s: &str) -> Result<(String, String), String> {
@@ -112,9 +127,7 @@ fn parse_label(s: &str) -> Result<(String, String), String> {
 }
 
 fn node_to_json(node: &pacinet_proto::NodeInfo) -> serde_json::Value {
-    let state = pacinet_proto::NodeState::try_from(node.state)
-        .map(|s| format!("{:?}", s))
-        .unwrap_or_else(|_| "unknown".to_string());
+    let state = state_name(node.state);
     json!({
         "node_id": node.node_id,
         "hostname": node.hostname,
@@ -122,6 +135,9 @@ fn node_to_json(node: &pacinet_proto::NodeInfo) -> serde_json::Value {
         "labels": node.labels,
         "state": state,
         "pacgate_version": node.pacgate_version,
+        "policy_hash": node.policy_hash,
+        "uptime_seconds": node.uptime_seconds,
+        "heartbeat_age_seconds": node.last_heartbeat_age_seconds,
     })
 }
 
@@ -139,6 +155,16 @@ fn state_name(state: i32) -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
+fn format_heartbeat_age(age_seconds: f64) -> String {
+    if age_seconds < 60.0 {
+        format!("{:.0}s", age_seconds)
+    } else if age_seconds < 3600.0 {
+        format!("{:.0}m", age_seconds / 60.0)
+    } else {
+        format!("{:.1}h", age_seconds / 3600.0)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -149,14 +175,23 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Node { action } => handle_node(action, &cli.server, cli.json).await?,
         Commands::Deploy {
-            node_id,
             rules_file,
+            node,
+            label,
             counters,
             rate_limit,
             conntrack,
         } => {
-            handle_deploy(&cli.server, &node_id, &rules_file, counters, rate_limit, conntrack)
-                .await?
+            handle_deploy(
+                &cli.server,
+                &rules_file,
+                node.as_deref(),
+                label,
+                counters,
+                rate_limit,
+                conntrack,
+            )
+            .await?
         }
         Commands::Policy { action } => handle_policy(action, &cli.server, cli.json).await?,
         Commands::Counters {
@@ -164,7 +199,7 @@ async fn main() -> Result<()> {
             aggregate,
             label,
         } => handle_counters(&cli.server, node_id, aggregate, label, cli.json).await?,
-        Commands::Status => handle_status(&cli.server).await?,
+        Commands::Status { label } => handle_status(&cli.server, label, cli.json).await?,
         Commands::Version => {
             println!("pacinet {}", env!("CARGO_PKG_VERSION"));
         }
@@ -198,13 +233,24 @@ async fn handle_node(action: NodeCommands, server: &str, as_json: bool) -> Resul
                 println!("No nodes registered");
             } else {
                 println!(
-                    "{:<38} {:<20} {:<25} STATE",
-                    "NODE ID", "HOSTNAME", "ADDRESS"
+                    "{:<38} {:<15} {:<10} {:<16} {:>5}",
+                    "NODE ID", "HOSTNAME", "STATE", "POLICY HASH", "HB"
                 );
                 for node in &response.nodes {
+                    let hash_short = if node.policy_hash.is_empty() {
+                        "-".to_string()
+                    } else if node.policy_hash.len() > 12 {
+                        node.policy_hash[..12].to_string()
+                    } else {
+                        node.policy_hash.clone()
+                    };
                     println!(
-                        "{:<38} {:<20} {:<25} {}",
-                        node.node_id, node.hostname, node.agent_address, state_name(node.state)
+                        "{:<38} {:<15} {:<10} {:<16} {:>5}",
+                        node.node_id,
+                        node.hostname,
+                        state_name(node.state),
+                        hash_short,
+                        format_heartbeat_age(node.last_heartbeat_age_seconds),
                     );
                 }
             }
@@ -226,6 +272,16 @@ async fn handle_node(action: NodeCommands, server: &str, as_json: bool) -> Resul
                     println!("Address:      {}", node.agent_address);
                     println!("PacGate:      {}", node.pacgate_version);
                     println!("State:        {}", state_name(node.state));
+                    if !node.policy_hash.is_empty() {
+                        println!("Policy Hash:  {}", node.policy_hash);
+                    }
+                    if node.uptime_seconds > 0 {
+                        println!("Uptime:       {}s", node.uptime_seconds);
+                    }
+                    println!(
+                        "Heartbeat:    {} ago",
+                        format_heartbeat_age(node.last_heartbeat_age_seconds)
+                    );
                     if !node.labels.is_empty() {
                         println!("Labels:");
                         for (k, v) in &node.labels {
@@ -258,8 +314,9 @@ async fn handle_node(action: NodeCommands, server: &str, as_json: bool) -> Resul
 
 async fn handle_deploy(
     server: &str,
-    node_id: &str,
     rules_file: &str,
+    node_id: Option<&str>,
+    label: Vec<(String, String)>,
     counters: bool,
     rate_limit: bool,
     conntrack: bool,
@@ -269,26 +326,69 @@ async fn handle_deploy(
 
     let mut client = connect(server).await?;
 
-    let response = client
-        .deploy_policy(pacinet_proto::DeployPolicyRequest {
-            node_id: node_id.to_string(),
-            rules_yaml,
-            options: Some(pacinet_proto::CompileOptions {
-                counters,
-                rate_limit,
-                conntrack,
-            }),
-        })
-        .await?
-        .into_inner();
+    let options = Some(pacinet_proto::CompileOptions {
+        counters,
+        rate_limit,
+        conntrack,
+    });
 
-    if response.success {
-        println!("Policy deployed to {}", node_id);
+    if let Some(nid) = node_id {
+        // Single-node deploy
+        let response = client
+            .deploy_policy(pacinet_proto::DeployPolicyRequest {
+                node_id: nid.to_string(),
+                rules_yaml,
+                options,
+            })
+            .await?
+            .into_inner();
+
+        if response.success {
+            println!("Policy deployed to {}", nid);
+        } else {
+            eprintln!("Deployment failed: {}", response.message);
+        }
+        for warning in &response.warnings {
+            eprintln!("  warning: {}", warning);
+        }
     } else {
-        eprintln!("Deployment failed: {}", response.message);
-    }
-    for warning in &response.warnings {
-        eprintln!("  warning: {}", warning);
+        // Batch deploy by label
+        let label_filter: std::collections::HashMap<String, String> =
+            label.into_iter().collect();
+
+        let response = client
+            .batch_deploy_policy(pacinet_proto::BatchDeployPolicyRequest {
+                label_filter,
+                rules_yaml,
+                options,
+            })
+            .await?
+            .into_inner();
+
+        if response.total_nodes == 0 {
+            println!("No nodes matched the label filter");
+            return Ok(());
+        }
+
+        // Show per-node table
+        println!(
+            "{:<38} {:<15} {:<10} MESSAGE",
+            "NODE ID", "HOSTNAME", "RESULT"
+        );
+        for result in &response.results {
+            let status = if result.success { "OK" } else { "FAILED" };
+            println!(
+                "{:<38} {:<15} {:<10} {}",
+                result.node_id, result.hostname, status, result.message
+            );
+            for warning in &result.warnings {
+                println!("  warning: {}", warning);
+            }
+        }
+        println!(
+            "\n{}/{} succeeded, {} failed",
+            response.succeeded, response.total_nodes, response.failed
+        );
     }
 
     Ok(())
@@ -318,6 +418,38 @@ async fn handle_policy(action: PolicyCommands, server: &str, as_json: bool) -> R
                 println!("Hash:   {}", response.policy_hash);
                 println!("---");
                 println!("{}", response.rules_yaml);
+            }
+        }
+        PolicyCommands::Diff { node_a, node_b } => {
+            let resp_a = client
+                .get_policy(pacinet_proto::GetPolicyRequest {
+                    node_id: node_a.clone(),
+                })
+                .await?
+                .into_inner();
+
+            let resp_b = client
+                .get_policy(pacinet_proto::GetPolicyRequest {
+                    node_id: node_b.clone(),
+                })
+                .await?
+                .into_inner();
+
+            if resp_a.rules_yaml == resp_b.rules_yaml {
+                println!("Policies are identical (hash: {})", resp_a.policy_hash);
+            } else {
+                use similar::TextDiff;
+                let diff = TextDiff::from_lines(&resp_a.rules_yaml, &resp_b.rules_yaml);
+                println!("--- {} ({})", node_a, resp_a.policy_hash);
+                println!("+++ {} ({})", node_b, resp_b.policy_hash);
+                for change in diff.iter_all_changes() {
+                    let sign = match change.tag() {
+                        similar::ChangeTag::Delete => "-",
+                        similar::ChangeTag::Insert => "+",
+                        similar::ChangeTag::Equal => " ",
+                    };
+                    print!("{}{}", sign, change);
+                }
             }
         }
     }
@@ -395,18 +527,82 @@ fn print_counters(counters: &[pacinet_proto::RuleCounter]) {
     }
 }
 
-async fn handle_status(server: &str) -> Result<()> {
+async fn handle_status(
+    server: &str,
+    label: Vec<(String, String)>,
+    as_json: bool,
+) -> Result<()> {
     match connect(server).await {
         Ok(mut client) => {
+            let label_filter: std::collections::HashMap<String, String> =
+                label.into_iter().collect();
+
             let response = client
-                .list_nodes(pacinet_proto::ListNodesRequest {
-                    label_filter: std::collections::HashMap::new(),
-                })
+                .get_fleet_status(pacinet_proto::GetFleetStatusRequest { label_filter })
                 .await?
                 .into_inner();
 
-            println!("Controller:  {} (connected)", server);
-            println!("Nodes:       {}", response.nodes.len());
+            if as_json {
+                let nodes: Vec<_> = response
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        json!({
+                            "node_id": n.node_id,
+                            "hostname": n.hostname,
+                            "state": state_name(n.state),
+                            "policy_hash": n.policy_hash,
+                            "uptime_seconds": n.uptime_seconds,
+                            "heartbeat_age_seconds": n.last_heartbeat_age_seconds,
+                        })
+                    })
+                    .collect();
+                let val = json!({
+                    "controller": server,
+                    "total_nodes": response.total_nodes,
+                    "nodes_by_state": response.nodes_by_state,
+                    "nodes": nodes,
+                });
+                println!("{}", serde_json::to_string_pretty(&val)?);
+            } else {
+                println!("Controller:  {} (connected)", server);
+                println!("Total nodes: {}", response.total_nodes);
+
+                if !response.nodes_by_state.is_empty() {
+                    let mut states: Vec<_> = response.nodes_by_state.iter().collect();
+                    states.sort_by_key(|(k, _)| (*k).clone());
+                    let summary: Vec<String> = states
+                        .iter()
+                        .map(|(state, count)| format!("{}={}", state, count))
+                        .collect();
+                    println!("By state:    {}", summary.join(", "));
+                }
+
+                if !response.nodes.is_empty() {
+                    println!();
+                    println!(
+                        "{:<38} {:<15} {:<10} {:<16} {:>5}",
+                        "NODE ID", "HOSTNAME", "STATE", "POLICY HASH", "HB"
+                    );
+                    for node in &response.nodes {
+                        let hash_short = if node.policy_hash.is_empty() {
+                            "-".to_string()
+                        } else if node.policy_hash.len() > 12 {
+                            node.policy_hash[..12].to_string()
+                        } else {
+                            node.policy_hash.clone()
+                        };
+                        println!(
+                            "{:<38} {:<15} {:<10} {:<16} {:>5}",
+                            node.node_id,
+                            node.hostname,
+                            state_name(node.state),
+                            hash_short,
+                            format_heartbeat_age(node.last_heartbeat_age_seconds),
+                        );
+                    }
+                }
+            }
         }
         Err(e) => {
             println!("Controller:  {} (unreachable)", server);

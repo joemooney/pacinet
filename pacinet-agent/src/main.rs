@@ -9,7 +9,8 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, Level};
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 /// PaciNet Node Agent
 #[derive(Parser, Debug)]
@@ -39,6 +40,14 @@ struct Args {
     /// Enable debug logging
     #[arg(short, long)]
     debug: bool,
+
+    /// Heartbeat interval in seconds
+    #[arg(long, default_value = "30")]
+    heartbeat_interval: u64,
+
+    /// Override PacGate version (auto-detected if not specified)
+    #[arg(long)]
+    pacgate_version: Option<String>,
 }
 
 fn parse_label(s: &str) -> Result<(String, String), String> {
@@ -53,14 +62,31 @@ fn parse_label(s: &str) -> Result<(String, String), String> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let level = if args.debug { Level::DEBUG } else { Level::INFO };
-    tracing_subscriber::fmt().with_max_level(level).init();
+    let default_level = if args.debug { "debug" } else { "info" };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let hostname = args
         .hostname
         .unwrap_or_else(|| gethostname().unwrap_or_else(|| "unknown".to_string()));
     let agent_address = format!("{}:{}", args.host, args.port);
     let labels: std::collections::HashMap<String, String> = args.label.into_iter().collect();
+
+    // Detect PacGate version
+    let pacgate_version = match &args.pacgate_version {
+        Some(v) => {
+            info!(version = %v, "Using specified PacGate version");
+            v.clone()
+        }
+        None => {
+            let detected = detect_pacgate_version().await;
+            match &detected {
+                v if v.is_empty() => info!("PacGate not found, using mock version"),
+                v => info!(version = %v, "Detected PacGate version"),
+            }
+            detected
+        }
+    };
 
     info!(
         controller = %args.controller,
@@ -75,12 +101,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &hostname,
         &agent_address,
         &labels,
+        &pacgate_version,
     )
     .await?;
 
     info!(node_id = %node_id, "Registered with controller");
 
     // Shared state for the agent
+    let pacgate_version_clone = pacgate_version.clone();
     let agent_state = Arc::new(RwLock::new(service::AgentState {
         node_id: node_id.clone(),
         controller_address: args.controller.clone(),
@@ -90,20 +118,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         deployed_at: None,
         start_time: tokio::time::Instant::now(),
         counters: vec![],
+        pacgate_version: pacgate_version_clone,
     }));
 
-    // Start agent gRPC server
-    let addr: SocketAddr = format!("127.0.0.1:{}", args.port).parse()?;
+    // Bind to configured host (fix: was hardcoded to 127.0.0.1)
+    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     info!("Agent gRPC server listening on {}", addr);
 
     let agent_service = service::AgentService::new(agent_state.clone());
 
-    // Spawn heartbeat task
+    // Spawn heartbeat task with configurable interval
     let hb_controller = args.controller.clone();
     let hb_node_id = node_id.clone();
     let hb_state = agent_state.clone();
+    let hb_interval = args.heartbeat_interval;
     tokio::spawn(async move {
-        heartbeat_loop(&hb_controller, &hb_node_id, hb_state).await;
+        heartbeat_loop(&hb_controller, &hb_node_id, hb_state, hb_interval).await;
     });
 
     tonic::transport::Server::builder()
@@ -121,6 +151,7 @@ async fn register_with_controller(
     hostname: &str,
     agent_address: &str,
     labels: &std::collections::HashMap<String, String>,
+    pacgate_version: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut client =
         pacinet_proto::paci_net_controller_client::PaciNetControllerClient::connect(
@@ -133,7 +164,7 @@ async fn register_with_controller(
             hostname: hostname.to_string(),
             agent_address: agent_address.to_string(),
             labels: labels.clone(),
-            pacgate_version: "0.1.0".to_string(),
+            pacgate_version: pacgate_version.to_string(),
         })
         .await?;
 
@@ -149,8 +180,16 @@ async fn heartbeat_loop(
     controller_addr: &str,
     node_id: &str,
     state: Arc<RwLock<service::AgentState>>,
+    interval_secs: u64,
 ) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+
+    // Create client once and reuse connection
+    let mut client = pacinet_proto::paci_net_controller_client::PaciNetControllerClient::connect(
+        controller_addr.to_string(),
+    )
+    .await
+    .ok();
 
     loop {
         interval.tick().await;
@@ -166,29 +205,69 @@ async fn heartbeat_loop(
             (uptime, ns)
         };
 
-        match pacinet_proto::paci_net_controller_client::PaciNetControllerClient::connect(
-            controller_addr.to_string(),
-        )
-        .await
-        {
-            Ok(mut client) => {
-                let result = client
-                    .heartbeat(pacinet_proto::HeartbeatRequest {
-                        node_id: node_id.to_string(),
-                        state: node_state as i32,
-                        cpu_usage: 0.0,
-                        uptime_seconds: uptime,
-                    })
-                    .await;
+        let request = pacinet_proto::HeartbeatRequest {
+            node_id: node_id.to_string(),
+            state: node_state as i32,
+            cpu_usage: 0.0,
+            uptime_seconds: uptime,
+        };
 
-                if let Err(e) = result {
-                    error!("Heartbeat failed: {}", e);
+        // Retry with exponential backoff: 500ms, 1s, 2s
+        let mut succeeded = false;
+        let backoffs = [500, 1000, 2000];
+
+        for (attempt, &backoff_ms) in backoffs.iter().enumerate() {
+            // Reconnect if client is missing
+            if client.is_none() {
+                match pacinet_proto::paci_net_controller_client::PaciNetControllerClient::connect(
+                    controller_addr.to_string(),
+                )
+                .await
+                {
+                    Ok(c) => client = Some(c),
+                    Err(e) => {
+                        warn!(attempt = attempt + 1, "Failed to connect for heartbeat: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        continue;
+                    }
                 }
             }
-            Err(e) => {
-                error!("Failed to connect for heartbeat: {}", e);
+
+            if let Some(ref mut c) = client {
+                match c.heartbeat(request.clone()).await {
+                    Ok(_) => {
+                        succeeded = true;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(attempt = attempt + 1, "Heartbeat failed: {}", e);
+                        // Connection may be stale, drop it to force reconnect
+                        client = None;
+                        if attempt < backoffs.len() - 1 {
+                            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        }
+                    }
+                }
             }
         }
+
+        if !succeeded {
+            error!("Heartbeat failed after 3 retries");
+        }
+    }
+}
+
+/// Detect PacGate version by running `pacgate --version`
+async fn detect_pacgate_version() -> String {
+    match tokio::process::Command::new("pacgate")
+        .arg("--version")
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => String::new(),
     }
 }
 

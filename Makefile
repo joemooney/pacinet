@@ -1,4 +1,4 @@
-.PHONY: build check test clean fmt clippy run-server run-agent integration-test test-all
+.PHONY: build check test clean fmt clippy run-server run-server-sqlite run-agent node-list status integration-test test-all
 
 build:
 	cargo build
@@ -20,6 +20,9 @@ clippy:
 
 run-server:
 	cargo run -p pacinet-server -- --port 50054
+
+run-server-sqlite:
+	cargo run -p pacinet-server -- --port 50054 --db pacinet.db
 
 run-agent:
 	cargo run -p pacinet-agent -- --controller http://127.0.0.1:50054
