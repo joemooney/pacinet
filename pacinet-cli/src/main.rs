@@ -218,6 +218,9 @@ async fn main() -> Result<()> {
     let level = if cli.debug { Level::DEBUG } else { Level::WARN };
     tracing_subscriber::fmt().with_max_level(level).init();
 
+    // Ensure crypto provider is available before any TLS operations
+    pacinet_core::tls::ensure_crypto_provider();
+
     // Configure TLS if certs provided
     let tls_config = match (&cli.ca_cert, &cli.tls_cert, &cli.tls_key) {
         (Some(ca), Some(cert), Some(key)) => Some(pacinet_core::tls::TlsConfig::new(
@@ -293,14 +296,15 @@ async fn connect(
 ) -> Result<PaciNetManagementClient<tonic::transport::Channel>> {
     if let Some(tls) = tls_config {
         let client_tls = pacinet_core::tls::load_client_tls(tls)
-            .map_err(|e| anyhow::anyhow!("TLS config error: {}", e))?;
-        let channel = tonic::transport::Channel::from_shared(server.to_string())
+            .map_err(|e| anyhow::anyhow!("TLS load error: {}", e))?;
+        let endpoint = tonic::transport::Channel::from_shared(server.to_string())
             .map_err(|e| anyhow::anyhow!("Invalid server URI: {}", e))?
             .tls_config(client_tls)
-            .map_err(|e| anyhow::anyhow!("TLS config error: {}", e))?
+            .map_err(|e| anyhow::anyhow!("TLS config error: {}", e))?;
+        let channel = endpoint
             .connect()
             .await
-            .context(format!("Failed to connect to controller at {}", server))?;
+            .context(format!("TLS connect to {} failed", server))?;
         Ok(PaciNetManagementClient::new(channel))
     } else {
         PaciNetManagementClient::connect(server.to_string())

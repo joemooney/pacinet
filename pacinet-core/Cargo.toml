@@ -11,3 +11,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "tls12"] }
