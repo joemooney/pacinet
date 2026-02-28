@@ -3,6 +3,7 @@
 //! Manages node registration, policy deployment, and counter aggregation.
 
 use pacinet_server::config::ControllerConfig;
+use pacinet_server::rest;
 use pacinet_server::service;
 use pacinet_server::storage;
 
@@ -69,6 +70,14 @@ struct Args {
     /// Server TLS private key
     #[arg(long)]
     tls_key: Option<String>,
+
+    /// Web dashboard HTTP port (0 to disable)
+    #[arg(long, default_value = "8081")]
+    web_port: u16,
+
+    /// Directory for static web files (SPA)
+    #[arg(long)]
+    static_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -246,12 +255,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         >>()
         .await;
 
+    // Shared shutdown signal
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
+    // Spawn REST/web server if enabled
+    if args.web_port > 0 {
+        let app_state = rest::AppState {
+            storage: storage.clone(),
+            config: config.clone(),
+            counter_cache: counter_cache.clone(),
+            fsm_engine: fsm_engine.clone(),
+            event_bus: event_bus.clone(),
+            tls_config: tls_config.clone(),
+        };
+
+        let mut app = rest::router(app_state);
+
+        // Serve static files with SPA fallback
+        let static_dir = args
+            .static_dir
+            .clone()
+            .unwrap_or_else(|| "pacinet-web/dist".to_string());
+        if std::path::Path::new(&static_dir).exists() {
+            info!(dir = %static_dir, "Serving static files for web dashboard");
+            app = app.fallback_service(
+                tower_http::services::ServeDir::new(&static_dir)
+                    .fallback(tower_http::services::ServeFile::new(format!(
+                        "{}/index.html",
+                        static_dir
+                    ))),
+            );
+        } else {
+            info!(dir = %static_dir, "Static dir not found, REST API only (dev mode)");
+        }
+
+        let web_addr: SocketAddr = format!("{}:{}", args.host, args.web_port).parse()?;
+        let mut web_shutdown_rx = shutdown_tx.subscribe();
+        info!("Web dashboard starting on http://{}", web_addr);
+        let listener = tokio::net::TcpListener::bind(web_addr).await?;
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = web_shutdown_rx.recv().await;
+                })
+                .await
+                .unwrap_or_else(|e| warn!("Web server error: {}", e));
+        });
+    }
+
+    let shutdown_tx_clone = shutdown_tx.clone();
     let shutdown = async move {
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C handler");
         info!("Shutdown signal received, draining connections...");
         let _ = fsm_shutdown_tx.send(true);
+        let _ = shutdown_tx_clone.send(());
     };
 
     let mut server = tonic::transport::Server::builder();

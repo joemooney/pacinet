@@ -3,6 +3,7 @@
 ## Feature Summary
 - **SDN controller** managing multiple PacGate FPGA packet filter nodes
 - **gRPC-based** architecture: controller (southbound + northbound), agent, CLI
+- **Web dashboard**: React SPA with REST API, SSE real-time streaming, fleet visualization
 - **Node lifecycle**: registration, heartbeat, policy deployment, counter collection
 - **End-to-end deployment**: CLI → Controller → Agent → PacGate
 - **YAML-defined FSM engine**: operator-defined deployment state machines (canary, staged, rollback)
@@ -10,6 +11,7 @@
 - **Counter rate tracking**: in-memory ring buffer of counter snapshots, rate calculation, multi-node aggregation (any/all/sum)
 - **Webhook alerts**: FSM alert actions deliver JSON payloads via HTTP webhooks with bearer/basic auth and retry
 - **Server-side streaming**: WatchFsmEvents, WatchCounters, WatchNodeEvents for real-time event observation
+- **SSE streaming**: REST API endpoints for browser-based real-time event observation
 - **EventBus**: broadcast channels (FSM, counter, node) for decoupled event emission and streaming delivery
 - **FSM orchestration**: background evaluation loop, condition-driven transitions, timer transitions, manual advance
 - **PacGate integration**: agent invokes `pacgate` CLI as subprocess (YAML interface)
@@ -32,10 +34,15 @@
 │ (pacinet)│   (mTLS opt.)    │ (pacinet-server)│───────gRPC──────▶│ (per node)   │
 └──────────┘                  └───────┬────────┘   (mTLS opt.)    └──────┬───────┘
                                       │                                  │
-                              ┌───────▼────────┐                  ┌─────▼───────┐
-                              │ Prometheus     │                  │ PacGate CLI │
-                              │ :9090/metrics  │                  │ (subprocess)│
-                              └────────────────┘                  └─────────────┘
+┌──────────┐     REST/SSE     ┌───────▼────────┐                  ┌─────▼───────┐
+│ Browser  │────HTTP :8081───▶│ axum REST API  │                  │ PacGate CLI │
+│ (React)  │                  │ + static files │                  │ (subprocess)│
+└──────────┘                  └───────┬────────┘                  └─────────────┘
+                                      │
+                              ┌───────▼────────┐
+                              │ Prometheus     │
+                              │ :9090/metrics  │
+                              └────────────────┘
 ```
 
 ### Workspace Crates
@@ -43,9 +50,10 @@
 |-------|------|---------|
 | `pacinet-proto` | lib | Generated gRPC/protobuf types |
 | `pacinet-core` | lib | Domain model, error types, Storage trait, TLS helpers, hash util, FSM types |
-| `pacinet-server` | lib+bin | Controller (port 50054) |
+| `pacinet-server` | lib+bin | Controller (gRPC :50054, REST :8081) |
 | `pacinet-agent` | lib+bin | Node agent (port 50055) |
 | `pacinet-cli` | bin | Operator CLI (`pacinet`) |
+| `pacinet-web` | npm | React SPA dashboard (Vite dev :5174) |
 
 ### gRPC Services
 - **PaciNetController** (agent → controller): RegisterNode, Heartbeat, ReportCounters
@@ -59,12 +67,16 @@ cargo test                     # Run all unit + integration tests
 make run-server                # Start controller on :50054 (in-memory)
 make run-server-sqlite         # Start controller on :50054 (SQLite)
 make run-server-tls            # Start with mTLS + SQLite + metrics
+make run-server-web            # Start with web dashboard on :8081
 make run-agent                 # Start agent, connect to controller (plain)
 make run-agent-tls             # Start agent with mTLS
 make gen-certs                 # Generate dev TLS certificates
 make node-list                 # List nodes via CLI
 make integration-test          # Run integration tests only
 make test-all                  # Run tests + clippy
+make web-install               # Install React app dependencies
+make web-dev                   # Start Vite dev server on :5174
+make web-build                 # Build React app to pacinet-web/dist/
 ```
 
 ## Key Design Decisions
@@ -98,8 +110,16 @@ make test-all                  # Run tests + clippy
 - Proto types do NOT have serde derives (prost_types::Timestamp incompatibility)
 - Domain types in pacinet-core have serde derives for JSON serialization
 - Both server and agent expose lib targets for integration testing
+- **REST API** (`rest.rs`): axum 0.8 router sharing same `AppState` (storage, config, counter_cache, fsm_engine, event_bus, tls_config) as gRPC services; no gRPC self-calls
+- **SSE endpoints**: `async_stream::stream!` macro with broadcast channel subscriptions; `RecvError::Lagged` logs and continues
+- **Static file serving**: `tower_http::services::ServeDir` with `ServeFile` fallback for SPA routing
+- **Dual server**: gRPC (tonic) on :50054 and REST (axum) on :8081, sharing state, coordinated shutdown via `broadcast::<()>`
+- **React SPA**: React 19 + TypeScript + Vite 6 + Tailwind CSS 4 + TanStack React Query + React Router DOM 7
+- **Web dev workflow**: Vite dev server on :5174 proxies `/api` to :8081; production serves built SPA from `pacinet-web/dist/`
 
 ## Port Assignments
 - Controller gRPC: 50054
+- Web dashboard REST + static: 8081 (configurable, 0 to disable)
+- Vite dev server: 5174 (dev only, proxies /api → 8081)
 - Agent gRPC: 50055 (configurable per node)
 - Prometheus metrics: 9090 (configurable, 0 to disable)

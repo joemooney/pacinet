@@ -1,4 +1,4 @@
-.PHONY: build check test clean fmt clippy run-server run-server-sqlite run-server-tls run-agent run-agent-tls node-list status integration-test test-all gen-certs
+.PHONY: build check test clean fmt clippy run-server run-server-sqlite run-server-tls run-agent run-agent-tls node-list status integration-test test-all gen-certs web-install web-dev web-build run-server-web
 
 build:
 	cargo build
@@ -51,3 +51,15 @@ integration-test:
 test-all:
 	cargo test --workspace
 	cargo clippy --workspace -- -D warnings
+
+web-install:
+	cd pacinet-web && npm install
+
+web-dev:
+	cd pacinet-web && npm run dev
+
+web-build:
+	cd pacinet-web && npm run build
+
+run-server-web:
+	cargo run -p pacinet-server -- --port 50054 --web-port 8081 --static-dir pacinet-web/dist

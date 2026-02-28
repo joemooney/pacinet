@@ -47,7 +47,9 @@ PaciNet follows a classic SDN controller architecture:
 
 ### Key Components
 
-1. **pacinet-server** — The central controller. Receives agent registrations, stores node state (in-memory or SQLite), handles policy deployment, batch deploy, fleet status, policy history, rollback, and forwards deploy requests to agents. Includes stale node reaper, FSM evaluation engine (background loop for YAML-defined deployment and adaptive policy state machines), counter snapshot cache (in-memory ring buffer for rate tracking), webhook delivery for alert actions, EventBus with broadcast channels for real-time streaming (FSM transitions, counter updates, node lifecycle events), Prometheus metrics endpoint, and gRPC health service. Supports mTLS.
+1. **pacinet-server** — The central controller. Receives agent registrations, stores node state (in-memory or SQLite), handles policy deployment, batch deploy, fleet status, policy history, rollback, and forwards deploy requests to agents. Includes stale node reaper, FSM evaluation engine (background loop for YAML-defined deployment and adaptive policy state machines), counter snapshot cache (in-memory ring buffer for rate tracking), webhook delivery for alert actions, EventBus with broadcast channels for real-time streaming (FSM transitions, counter updates, node lifecycle events), Prometheus metrics endpoint, gRPC health service, and axum REST API with SSE endpoints for the web dashboard. Supports mTLS on gRPC channels.
+
+6. **pacinet-web** — React SPA dashboard (not a Rust crate). Provides browser-based fleet visibility: dashboard with live metrics, node management, policy deployment, counter monitoring, FSM management, and real-time event streaming via SSE. Built with React 19, TypeScript, Vite 6, Tailwind CSS 4, TanStack React Query, and React Router DOM 7. Styled identically to the aida-web-react project (dark/light theme, Inter + JetBrains Mono fonts).
 
 2. **pacinet-agent** — Runs on each PacGate node. Registers with the controller on startup, sends periodic heartbeats with retry/backoff, handles rule deployment by invoking the `pacgate` CLI, auto-detects PacGate version, reports counters and CPU usage. Supports graceful shutdown and mTLS.
 
@@ -98,21 +100,33 @@ Development certificates can be generated with `make gen-certs` (requires openss
 - **tonic-web** for gRPC-Web support
 - **similar** for policy diff
 - **reqwest** (rustls-tls) for webhook HTTP delivery
-- **async-stream** for server-side streaming RPC implementation
+- **async-stream** for server-side streaming RPC and SSE implementation
 - **tokio-stream** for stream consumption in CLI
+- **axum 0.8** for REST API (web dashboard backend)
+- **tower-http 0.6** for CORS and static file serving
+- **React 19** + **TypeScript** + **Vite 6** + **Tailwind CSS 4** for web dashboard
+- **TanStack React Query 5** for data fetching and caching
+- **React Router DOM 7** for SPA routing
+- **lucide-react** for icons
 
 ## Current Status
 
-**Phase 6 complete** — gRPC server-side streaming for real-time event observation:
-- **EventBus**: broadcast channels (FSM, counter, node) for decoupled event emission and streaming delivery
-- **WatchFsmEvents**: stream FSM transitions, deploy progress, and instance completions (optional instance_id filter)
-- **WatchCounters**: stream counter updates with calculated rates (optional node_id filter)
-- **WatchNodeEvents**: stream node lifecycle events — registered, state changed, heartbeat stale, removed (optional label filter)
-- **CLI watch commands**: `pacinet watch fsm|counters|nodes` with human-readable and JSON output
-- **Event emission**: from ControllerService (register, heartbeat, counters, remove), FsmEngine (transition, deploy, cancel, complete), and stale node reaper
+**Phase 7 complete** — Web dashboard with REST API and SSE real-time streaming:
+- **REST API**: axum 0.8 router with 20+ endpoints for nodes, fleet, counters, deploy, FSM definitions/instances
+- **SSE endpoints**: 3 Server-Sent Events streams (nodes, counters, FSM) from shared EventBus
+- **React SPA**: 6 pages — Dashboard, Nodes, Deploy, Counters, FSM, Watch
+- **Dashboard**: fleet metrics cards, donut chart (CSS conic-gradient), live event feed, FSM summary
+- **Node management**: filterable table, detail panel with policy, counters, deploy history
+- **Deploy interface**: single/batch mode, YAML editor, compile options
+- **Counter monitoring**: per-node tables with live rates via SSE
+- **FSM management**: definition CRUD, instance lifecycle (start/advance/cancel), transition timeline
+- **Watch page**: combined live event feed with type filters and auto-scroll
+- **Dual server**: gRPC on :50054 + REST on :8081, sharing state, coordinated shutdown
+- **Static file serving**: SPA fallback for production; Vite proxy for development
 - 93 tests (32 core, 30 server unit, 10 agent, 21 integration) all passing, clippy clean
 
 Previous phases:
+- Phase 6: gRPC server-side streaming, EventBus, CLI watch commands
 - Phase 5b: Counter rate tracking & adaptive policy FSMs, webhook delivery
 - Phase 5: YAML-defined FSM engine for deployment orchestration
 - Phase 4: mTLS security, Prometheus metrics, policy rollback, CI pipeline

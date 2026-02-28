@@ -525,3 +525,85 @@ Implement Phase 6: gRPC server-side streaming for real-time event observation. A
 ### Git Operations
 - Committed Phase 6 changes
 - Pushed to GitHub
+
+## Session 8 — Web Dashboard (Phase 7) (2026-02-27)
+
+### Prompt
+Implement Phase 7: Web dashboard with REST API and React SPA. Add axum REST API sharing state with gRPC services, SSE endpoints for real-time streaming, static file serving with SPA fallback, and a full React SPA with 6 pages (Dashboard, Nodes, Deploy, Counters, FSM, Watch). Style identically to the aida-web-react project.
+
+### Actions Taken
+
+#### 1. Dependency Changes
+- Added `axum = "0.8"` and `tower-http = { version = "0.6", features = ["cors", "fs"] }` to workspace Cargo.toml
+- Added axum and tower-http to pacinet-server/Cargo.toml
+
+#### 2. REST API Module (`pacinet-server/src/rest.rs`) — NEW (~900 lines)
+- `AppState` struct sharing storage, config, counter_cache, fsm_engine, event_bus, tls_config with gRPC services
+- `router()` function with 20+ routes for nodes, fleet, counters, deploy, FSM definitions/instances
+- JSON response/request types with serde Serialize/Deserialize
+- `blocking()` helper wrapping sync Storage calls in `spawn_blocking`
+- `parse_label_filter()` helper for "key=val,key2=val2" query params
+- `AppError` mapping tonic::Status codes to HTTP status codes
+- 3 SSE endpoints (`/api/events/nodes`, `/api/events/counters`, `/api/events/fsm`) using `async_stream::stream!` with broadcast channel subscriptions
+- CORS middleware via `tower_http::cors::CorsLayer`
+- Label filter support on list endpoints
+
+#### 3. Server Main Updates (`pacinet-server/src/main.rs`)
+- Added `--web-port` CLI arg (default 8081, 0 to disable)
+- Added `--static-dir` CLI arg (optional, defaults to `pacinet-web/dist`)
+- Build `AppState` from shared resources
+- Spawn axum server alongside tonic gRPC with `tokio::spawn`
+- Static file serving via `tower_http::services::ServeDir` with `ServeFile` fallback for SPA routing
+- Shared shutdown via `tokio::sync::broadcast::<()>(1)` channel
+- Added `pub mod rest;` to lib.rs
+
+#### 4. React App Scaffold (`pacinet-web/`) — NEW
+- package.json: React 19.1, React Router DOM 7.13, TanStack React Query 5.90, lucide-react, Tailwind CSS 4.1, Vite 6.3, TypeScript 5.8
+- vite.config.ts: dev server on :5174, proxy `/api` → `http://localhost:8081`
+- tsconfig.json, tsconfig.app.json, tsconfig.node.json, postcss.config.cjs
+- index.html with Vite entry point
+- index.css copied from aida-web-react with identical theme (dark/light, CSS custom properties, Inter + JetBrains Mono fonts)
+
+#### 5. React Components — ALL NEW
+- **Entry**: main.tsx (QueryClientProvider), App.tsx (BrowserRouter + routes)
+- **Layout**: AppLayout.tsx, Sidebar.tsx (collapsible nav with lucide-react icons), Header.tsx (theme toggle, refresh)
+- **UI primitives**: Badge.tsx, Button.tsx (4 variants), Card.tsx, Spinner.tsx, Table.tsx
+- **API layer**: client.ts (apiFetch<T> wrapper), types/api.ts (TypeScript interfaces for all REST types)
+- **Utilities**: utils.ts (formatDuration, formatAge, formatTimestamp, stateColors, stateColorClass)
+- **Hooks**: useNodes.ts, useFleet.ts, useCounters.ts, useDeploy.ts, useFsm.ts (React Query), useEvents.ts (SSE via EventSource)
+
+#### 6. React Pages — ALL NEW
+- **Dashboard** (`/`): DashboardPage.tsx, StatusChart.tsx (CSS conic-gradient donut), RecentEvents.tsx (live SSE feed), FsmSummary.tsx
+- **Nodes** (`/nodes`): NodesPage.tsx, NodeRow.tsx (state badge, labels, heartbeat age), NodeDetail.tsx (slide-in panel)
+- **Deploy** (`/deploy`): DeployPage.tsx (single/batch mode, YAML textarea, compile options)
+- **Counters** (`/counters`): CountersPage.tsx (node selector, rate display, SSE updates)
+- **FSM** (`/fsm`): FsmPage.tsx (tabs), DefinitionList.tsx, InstanceList.tsx, InstanceDetail.tsx (transition timeline)
+- **Watch** (`/watch`): WatchPage.tsx (combined 3-stream SSE feed, type/text filters, auto-scroll with pause-on-hover)
+
+#### 7. Build Infrastructure
+- Makefile: added `web-install`, `web-dev`, `web-build`, `run-server-web` targets
+- Updated ~/.ports: added `pacinet_web:8081` and `pacinet_web_dev:5174`
+
+#### 8. Documentation
+- Updated CLAUDE.md: web dashboard features, updated architecture diagram, new commands, web design decisions, updated port assignments
+- Updated OVERVIEW.md: pacinet-web component, technology stack, status to Phase 7
+- Updated REQUIREMENTS.md: REST API (7.5), SSE (7.6), static serving (7.7), port assignments, web dashboard section (12)
+- Updated PROMPT_HISTORY.md: Session 8
+
+### Errors Encountered & Fixed
+- **`BroadcastStreamRecvError` import error**: `tokio_stream::wrappers::errors::BroadcastStreamRecvError` gated behind `sync` feature. Removed unused import; used `tokio::sync::broadcast::error::RecvError` directly.
+- **`CompileOptions` not found**: Re-exported as `FsmCompileOptions` in pacinet-core. Changed all references.
+- **Unused imports**: Removed `crate::counter_rate`, `delete` from routing, `tokio_stream::StreamExt`.
+- **TypeScript `shortId` unused import**: Removed from InstanceDetail.tsx.
+- **Missing CSS module declaration**: Created `vite-env.d.ts` with `/// <reference types="vite/client" />`.
+- **Port 8080 conflict with aida_rest**: Changed default web port to 8081 in main.rs, Makefile, vite proxy.
+- **Port 5173 conflict with aida_web_react**: Changed Vite dev port to 5174.
+
+### Test Results
+- 93 tests total, all passing (no new Rust tests — REST API verified by manual E2E)
+- cargo clippy --workspace -- -D warnings: clean
+- React build succeeds: dist/assets/index-DNqh8Iig.js (315KB, 95KB gzip)
+
+### Git Operations
+- Committed Phase 7 changes
+- Pushed to GitHub

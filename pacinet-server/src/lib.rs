@@ -5,6 +5,7 @@ pub mod deploy;
 pub mod events;
 pub mod fsm_engine;
 pub mod metrics;
+pub mod rest;
 pub mod service;
 pub mod storage;
 pub mod webhook;

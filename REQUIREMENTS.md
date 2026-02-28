@@ -224,7 +224,9 @@
 - PaciNetManagement (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy, CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm, WatchFsmEvents (stream), WatchCounters (stream), WatchNodeEvents (stream)
 
 ### 7.2 Port Assignments
-- Controller: 50054 (configurable)
+- Controller gRPC: 50054 (configurable)
+- Web dashboard REST + static: 8081 (configurable, 0 to disable)
+- Vite dev server: 5174 (dev only, proxies /api → 8081)
 - Agent: 50055 (configurable per node)
 - Prometheus metrics: 9090 (configurable, 0 to disable)
 
@@ -233,6 +235,37 @@
 
 ### 7.4 gRPC-Web
 - HTTP/1 support via tonic-web for browser-based clients
+
+### 7.5 REST API
+- Axum 0.8 HTTP server on configurable port (default 8081, 0 to disable)
+- Shares same state (storage, config, counter_cache, fsm_engine, event_bus) as gRPC services
+- Endpoints:
+  - GET/DELETE `/api/nodes`, `/api/nodes/:id` — node CRUD
+  - GET `/api/nodes/:id/policy`, `/api/nodes/:id/counters` — node data
+  - GET `/api/nodes/:id/policy/history`, `/api/nodes/:id/deploy/history` — audit
+  - POST `/api/nodes/:id/policy/rollback` — rollback
+  - GET `/api/fleet` — fleet status
+  - GET `/api/counters` — aggregate counters
+  - POST `/api/deploy`, `/api/deploy/batch` — policy deployment
+  - GET/POST/DELETE `/api/fsm/definitions`, `/api/fsm/definitions/:name` — FSM def CRUD
+  - GET/POST `/api/fsm/instances`, `/api/fsm/instances/:id` — FSM instance CRUD
+  - POST `/api/fsm/instances/:id/advance`, `/api/fsm/instances/:id/cancel` — FSM actions
+- Query params: `?label=key%3Dval` for label filters, `?limit=N` for history
+- CORS enabled for browser access
+- JSON request/response with serde Serialize/Deserialize types
+
+### 7.6 SSE (Server-Sent Events)
+- GET `/api/events/nodes` — node lifecycle events (optional `?label=key%3Dval` filter)
+- GET `/api/events/counters` — counter updates (optional `?node=<id>` filter)
+- GET `/api/events/fsm` — FSM transitions (optional `?instance=<id>` filter)
+- Subscribes to EventBus broadcast channels
+- KeepAlive enabled for connection persistence
+- Lagged events logged and skipped
+
+### 7.7 Static File Serving
+- Serves SPA from `--static-dir` (default `pacinet-web/dist/`)
+- SPA fallback: unmatched GET routes serve `index.html`
+- When static dir not found, REST API still works (dev mode)
 
 ## 8. Security
 
@@ -354,3 +387,33 @@
 - GitHub Actions pipeline on push and pull_request
 - Steps: cargo check, clippy (warnings as errors), test, fmt check
 - Rust stable toolchain with caching
+
+## 12. Web Dashboard
+
+### 12.1 Technology Stack
+- React 19 + TypeScript 5.8 + Vite 6
+- Tailwind CSS 4 (dark/light theme, identical to aida-web-react)
+- TanStack React Query 5 for data fetching and caching
+- React Router DOM 7 for SPA routing
+- lucide-react for icons
+- Inter + JetBrains Mono fonts
+
+### 12.2 Pages
+- **Dashboard** (`/`): fleet metrics cards, donut chart (CSS conic-gradient), live event feed, FSM summary
+- **Nodes** (`/nodes`): filterable table, click-to-detail panel with policy, counters, deploy history, remove action
+- **Deploy** (`/deploy`): single/batch mode toggle, YAML textarea, compile options, result display
+- **Counters** (`/counters`): node selector, counter table with live rates via SSE, aggregate view
+- **FSM** (`/fsm`): tabbed view — definitions (CRUD from YAML) and instances (start/advance/cancel, transition timeline)
+- **Watch** (`/watch`): combined live event feed from all 3 SSE streams, type/text filters, auto-scroll
+
+### 12.3 Real-Time Updates
+- SSE (Server-Sent Events) via EventSource API for live data
+- React Query with 5s refetch interval for REST data
+- Pause-on-hover for auto-scrolling event feeds
+
+### 12.4 Build & Dev Workflow
+- `make web-install` — install npm dependencies
+- `make web-dev` — Vite dev server on :5174 (proxies /api → :8081)
+- `make web-build` — build to pacinet-web/dist/
+- `make run-server-web` — server with built SPA on :8081
+- Production: build React, serve from `--static-dir`
