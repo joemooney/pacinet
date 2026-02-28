@@ -11,7 +11,8 @@ use crate::fsm_engine::FsmEngine;
 use crate::storage::blocking;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -35,6 +36,7 @@ pub struct AppState {
     pub fsm_engine: Arc<FsmEngine>,
     pub event_bus: EventBus,
     pub tls_config: Option<pacinet_core::tls::TlsConfig>,
+    pub api_key: Option<String>,
 }
 
 // ============================================================================
@@ -382,6 +384,119 @@ fn parse_label_filter(label: &Option<String>) -> HashMap<String, String> {
 }
 
 // ============================================================================
+// Health response
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct HealthResponse {
+    pub status: String,
+    pub auth_required: bool,
+    pub role: String,
+}
+
+// ============================================================================
+// Event history types
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct PersistentEventJson {
+    pub id: String,
+    pub event_type: String,
+    pub source: String,
+    pub payload: serde_json::Value,
+    pub timestamp: String,
+}
+
+#[derive(Deserialize)]
+pub struct EventHistoryQuery {
+    #[serde(default, rename = "type")]
+    pub event_type: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default = "default_event_limit")]
+    pub limit: u32,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+fn default_event_limit() -> u32 {
+    50
+}
+
+// ============================================================================
+// SSE token query (for auth via query param)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct SseTokenQuery {
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+// ============================================================================
+// Auth middleware
+// ============================================================================
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if let Some(ref expected_key) = state.api_key {
+        // Check Authorization header first
+        let auth_ok = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| {
+                v.strip_prefix("Bearer ")
+                    .map(|token| token == expected_key)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        if !auth_ok {
+            // Check ?token= query param (needed for EventSource/SSE)
+            let token_ok = req
+                .uri()
+                .query()
+                .and_then(|q| {
+                    q.split('&')
+                        .find(|p| p.starts_with("token="))
+                        .map(|p| &p[6..] == expected_key)
+                })
+                .unwrap_or(false);
+
+            if !token_ok {
+                return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+            }
+        }
+    }
+
+    next.run(req).await
+}
+
+// ============================================================================
+// Leader guard helper
+// ============================================================================
+
+fn require_leader(config: &ControllerConfig) -> Result<(), AppError> {
+    if !config.is_leader() {
+        Err(AppError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This controller is in standby mode. Write operations must go to the leader."
+                .to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Router
 // ============================================================================
 
@@ -391,7 +506,13 @@ pub fn router(state: AppState) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    Router::new()
+    // Health endpoint — always accessible (no auth)
+    let health_routes = Router::new()
+        .route("/api/health", get(health_check))
+        .with_state(state.clone());
+
+    // All other API endpoints — auth required when key configured
+    let api_routes = Router::new()
         // Node endpoints
         .route("/api/nodes", get(list_nodes))
         .route("/api/nodes/{id}", get(get_node).delete(remove_node))
@@ -428,8 +549,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/nodes", get(sse_node_events))
         .route("/api/events/counters", get(sse_counter_events))
         .route("/api/events/fsm", get(sse_fsm_events))
-        .layer(cors)
-        .with_state(state)
+        // Event history
+        .route("/api/events/history", get(get_event_history))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .with_state(state);
+
+    health_routes.merge(api_routes).layer(cors)
 }
 
 // ============================================================================
@@ -505,6 +633,7 @@ async fn remove_node(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<SuccessResponse>, AppError> {
+    require_leader(&state.config)?;
     // Fetch node before removal for event emission
     let nid = id.clone();
     let node_before =
@@ -621,6 +750,7 @@ async fn rollback_policy(
     Path(id): Path<String>,
     Json(body): Json<RollbackRequest>,
 ) -> Result<Json<RollbackResponse>, AppError> {
+    require_leader(&state.config)?;
     // Verify node exists
     let node_id = id.clone();
     let node = blocking(&state.storage, move |s| s.get_node(&node_id))
@@ -803,6 +933,7 @@ async fn deploy_policy(
     State(state): State<AppState>,
     Json(body): Json<DeployRequest>,
 ) -> Result<Json<DeployResponse>, AppError> {
+    require_leader(&state.config)?;
     let node_id = body.node_id.clone();
     let node = blocking(&state.storage, move |s| s.get_node(&node_id))
         .await?
@@ -847,6 +978,7 @@ async fn batch_deploy_policy(
     State(state): State<AppState>,
     Json(body): Json<BatchDeployRequest>,
 ) -> Result<Json<BatchDeployResultJson>, AppError> {
+    require_leader(&state.config)?;
     let label_filter = body.label_filter.clone();
     let nodes = blocking(&state.storage, move |s| s.list_nodes(&label_filter)).await?;
 
@@ -965,6 +1097,7 @@ async fn create_fsm_definition(
     State(state): State<AppState>,
     Json(body): Json<CreateFsmDefRequest>,
 ) -> Result<Json<CreateFsmDefResponse>, AppError> {
+    require_leader(&state.config)?;
     let def = pacinet_core::fsm::FsmDefinition::from_yaml(&body.definition_yaml)
         .map_err(|e| AppError(StatusCode::BAD_REQUEST, format!("Invalid YAML: {}", e)))?;
     def.validate()
@@ -984,6 +1117,7 @@ async fn delete_fsm_definition(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<SuccessResponse>, AppError> {
+    require_leader(&state.config)?;
     let def_name = name.clone();
     let deleted =
         blocking(&state.storage, move |s| s.delete_fsm_definition(&def_name)).await?;
@@ -1050,6 +1184,7 @@ async fn start_fsm(
     State(state): State<AppState>,
     Json(body): Json<StartFsmRequest>,
 ) -> Result<Json<StartFsmResponse>, AppError> {
+    require_leader(&state.config)?;
     let compile_opts = Some(pacinet_core::fsm::FsmCompileOptions {
         counters: body.counters,
         rate_limit: body.rate_limit,
@@ -1097,6 +1232,7 @@ async fn advance_fsm(
     Path(id): Path<String>,
     Json(body): Json<AdvanceFsmRequest>,
 ) -> Result<Json<AdvanceFsmResponse>, AppError> {
+    require_leader(&state.config)?;
     match state
         .fsm_engine
         .advance_instance(&id, body.target_state)
@@ -1120,6 +1256,7 @@ async fn cancel_fsm(
     Path(id): Path<String>,
     Json(body): Json<CancelFsmRequest>,
 ) -> Result<Json<SuccessResponse>, AppError> {
+    require_leader(&state.config)?;
     match state.fsm_engine.cancel_instance(&id, &body.reason).await {
         Ok(()) => Ok(Json(SuccessResponse {
             success: true,
@@ -1472,4 +1609,68 @@ fn fsm_event_to_json(event: &FsmEvent) -> FsmEventJson {
             timestamp: timestamp.to_rfc3339(),
         },
     }
+}
+
+// ============================================================================
+// Health check handler (no auth required)
+// ============================================================================
+
+async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
+    let role = if state.config.is_leader() {
+        "leader"
+    } else {
+        "standby"
+    };
+    Json(HealthResponse {
+        status: "ok".to_string(),
+        auth_required: state.api_key.is_some(),
+        role: role.to_string(),
+    })
+}
+
+// ============================================================================
+// Event history handler
+// ============================================================================
+
+async fn get_event_history(
+    State(state): State<AppState>,
+    Query(q): Query<EventHistoryQuery>,
+) -> Result<Json<Vec<PersistentEventJson>>, AppError> {
+    let since = q.since.as_deref().and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    });
+    let until = q.until.as_deref().and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    });
+    let event_type = q.event_type.clone();
+    let source = q.source.clone();
+    let limit = q.limit;
+
+    let events = blocking(&state.storage, move |s| {
+        s.query_events(
+            event_type.as_deref(),
+            source.as_deref(),
+            since,
+            until,
+            limit,
+        )
+    })
+    .await?;
+
+    let result: Vec<PersistentEventJson> = events
+        .into_iter()
+        .map(|e| PersistentEventJson {
+            id: e.id,
+            event_type: e.event_type,
+            source: e.source,
+            payload: serde_json::from_str(&e.payload).unwrap_or(serde_json::Value::Null),
+            timestamp: e.timestamp.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(result))
 }

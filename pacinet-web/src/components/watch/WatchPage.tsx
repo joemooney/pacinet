@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNodeEvents, useCounterEvents, useFsmEvents } from '../../hooks/useEvents';
+import { useNodeEvents, useCounterEvents, useFsmEvents, useEventHistory } from '../../hooks/useEvents';
 import { formatTimestamp } from '../../lib/utils';
 import Badge from '../ui/Badge';
 
@@ -11,7 +11,10 @@ type UnifiedEvent = {
   detail?: string;
 };
 
+type Tab = 'live' | 'history';
+
 export default function WatchPage() {
+  const [tab, setTab] = useState<Tab>('live');
   const [filters, setFilters] = useState<Record<EventType, boolean>>({
     nodes: true,
     counters: true,
@@ -21,11 +24,21 @@ export default function WatchPage() {
   const [paused, setPaused] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
 
+  // History filters
+  const [historyType, setHistoryType] = useState('');
+  const [historySource, setHistorySource] = useState('');
+  const [historyLimit, setHistoryLimit] = useState(50);
+
   const nodeEvents = useNodeEvents();
   const counterEvents = useCounterEvents();
   const fsmEvents = useFsmEvents();
+  const { events: historyEvents, loading: historyLoading, refetch } = useEventHistory({
+    type: historyType || undefined,
+    source: historySource || undefined,
+    limit: historyLimit,
+  });
 
-  // Combine and sort events
+  // Combine and sort live events
   const unified: UnifiedEvent[] = [];
 
   if (filters.nodes) {
@@ -61,10 +74,8 @@ export default function WatchPage() {
     }
   }
 
-  // Sort by timestamp descending
   unified.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-  // Apply text filter
   const filtered = textFilter
     ? unified.filter(
         (e) =>
@@ -73,7 +84,6 @@ export default function WatchPage() {
       )
     : unified;
 
-  // Auto-scroll
   useEffect(() => {
     if (!paused && feedRef.current) {
       feedRef.current.scrollTop = 0;
@@ -86,64 +96,169 @@ export default function WatchPage() {
     fsm: 'bg-purple-500/20 text-purple-400',
   };
 
+  const eventTypeColor = (et: string): string => {
+    if (et.startsWith('node')) return typeColors.nodes;
+    if (et.startsWith('counter')) return typeColors.counters;
+    if (et.startsWith('fsm')) return typeColors.fsm;
+    return 'bg-gray-500/20 text-gray-400';
+  };
+
   return (
     <div className="h-full flex flex-col animate-fade-in">
-      {/* Filters */}
-      <div className="flex items-center gap-4 mb-4 flex-shrink-0">
-        {(['nodes', 'counters', 'fsm'] as EventType[]).map((type) => (
-          <label key={type} className="flex items-center gap-2 text-sm text-content-secondary">
-            <input
-              type="checkbox"
-              checked={filters[type]}
-              onChange={(e) => setFilters((f) => ({ ...f, [type]: e.target.checked }))}
-              className="accent-accent"
-            />
-            {type.charAt(0).toUpperCase() + type.slice(1)}
-          </label>
-        ))}
-        <input
-          type="text"
-          value={textFilter}
-          onChange={(e) => setTextFilter(e.target.value)}
-          placeholder="Filter events..."
-          className="px-3 py-1.5 bg-surface border border-edge rounded-lg text-sm text-content placeholder:text-content-muted focus:outline-none focus:border-accent w-48"
-        />
-        <span className="text-xs text-content-muted ml-auto">{filtered.length} events</span>
+      {/* Tab toggle */}
+      <div className="flex items-center gap-2 mb-4">
+        <button
+          onClick={() => setTab('live')}
+          className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+            tab === 'live' ? 'bg-accent text-white' : 'text-content-secondary hover:text-content hover:bg-surface-hover'
+          }`}
+        >
+          Live
+        </button>
+        <button
+          onClick={() => setTab('history')}
+          className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+            tab === 'history' ? 'bg-accent text-white' : 'text-content-secondary hover:text-content hover:bg-surface-hover'
+          }`}
+        >
+          History
+        </button>
       </div>
 
-      {/* Event feed */}
-      <div
-        ref={feedRef}
-        className="flex-1 overflow-y-auto bg-surface-alt border border-edge rounded-xl"
-        onMouseEnter={() => setPaused(true)}
-        onMouseLeave={() => setPaused(false)}
-      >
-        {filtered.length === 0 ? (
-          <div className="text-sm text-content-muted py-8 text-center">
-            No events. Events appear here in real time via SSE.
-          </div>
-        ) : (
-          <div className="divide-y divide-edge">
-            {filtered.map((e, i) => (
-              <div key={i} className="flex items-start gap-3 px-4 py-2.5 text-sm">
-                <Badge className={typeColors[e.type]}>{e.type}</Badge>
-                <span className="flex-1">
-                  {e.summary}
-                  {e.detail && <span className="text-content-muted ml-2">{e.detail}</span>}
-                </span>
-                <span className="text-xs text-content-muted whitespace-nowrap">
-                  {formatTimestamp(e.timestamp)}
-                </span>
-              </div>
+      {tab === 'live' ? (
+        <>
+          {/* Live filters */}
+          <div className="flex items-center gap-4 mb-4 flex-shrink-0">
+            {(['nodes', 'counters', 'fsm'] as EventType[]).map((type) => (
+              <label key={type} className="flex items-center gap-2 text-sm text-content-secondary">
+                <input
+                  type="checkbox"
+                  checked={filters[type]}
+                  onChange={(e) => setFilters((f) => ({ ...f, [type]: e.target.checked }))}
+                  className="accent-accent"
+                />
+                {type.charAt(0).toUpperCase() + type.slice(1)}
+              </label>
             ))}
+            <input
+              type="text"
+              value={textFilter}
+              onChange={(e) => setTextFilter(e.target.value)}
+              placeholder="Filter events..."
+              className="px-3 py-1.5 bg-surface border border-edge rounded-lg text-sm text-content placeholder:text-content-muted focus:outline-none focus:border-accent w-48"
+            />
+            <span className="text-xs text-content-muted ml-auto">{filtered.length} events</span>
           </div>
-        )}
-      </div>
 
-      {paused && (
-        <div className="text-center text-xs text-content-muted mt-2">
-          Auto-scroll paused (hover)
-        </div>
+          {/* Live event feed */}
+          <div
+            ref={feedRef}
+            className="flex-1 overflow-y-auto bg-surface-alt border border-edge rounded-xl"
+            onMouseEnter={() => setPaused(true)}
+            onMouseLeave={() => setPaused(false)}
+          >
+            {filtered.length === 0 ? (
+              <div className="text-sm text-content-muted py-8 text-center">
+                No events. Events appear here in real time via SSE.
+              </div>
+            ) : (
+              <div className="divide-y divide-edge">
+                {filtered.map((e, i) => (
+                  <div key={i} className="flex items-start gap-3 px-4 py-2.5 text-sm">
+                    <Badge className={typeColors[e.type]}>{e.type}</Badge>
+                    <span className="flex-1">
+                      {e.summary}
+                      {e.detail && <span className="text-content-muted ml-2">{e.detail}</span>}
+                    </span>
+                    <span className="text-xs text-content-muted whitespace-nowrap">
+                      {formatTimestamp(e.timestamp)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {paused && (
+            <div className="text-center text-xs text-content-muted mt-2">
+              Auto-scroll paused (hover)
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          {/* History filters */}
+          <div className="flex items-center gap-4 mb-4 flex-shrink-0">
+            <div>
+              <label className="block text-xs text-content-muted mb-1">Event Type</label>
+              <select
+                value={historyType}
+                onChange={(e) => setHistoryType(e.target.value)}
+                className="px-3 py-1.5 bg-surface border border-edge rounded-lg text-sm text-content focus:outline-none focus:border-accent"
+              >
+                <option value="">All</option>
+                <option value="node">Node</option>
+                <option value="fsm">FSM</option>
+                <option value="counter">Counter</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-content-muted mb-1">Source</label>
+              <input
+                type="text"
+                value={historySource}
+                onChange={(e) => setHistorySource(e.target.value)}
+                placeholder="node ID or instance ID"
+                className="px-3 py-1.5 bg-surface border border-edge rounded-lg text-sm text-content placeholder:text-content-muted focus:outline-none focus:border-accent w-48"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-content-muted mb-1">Limit</label>
+              <select
+                value={historyLimit}
+                onChange={(e) => setHistoryLimit(Number(e.target.value))}
+                className="px-3 py-1.5 bg-surface border border-edge rounded-lg text-sm text-content focus:outline-none focus:border-accent"
+              >
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={200}>200</option>
+              </select>
+            </div>
+            <button
+              onClick={refetch}
+              className="mt-4 px-3 py-1.5 text-sm bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
+            >
+              Refresh
+            </button>
+            <span className="text-xs text-content-muted ml-auto mt-4">{historyEvents.length} events</span>
+          </div>
+
+          {/* History feed */}
+          <div className="flex-1 overflow-y-auto bg-surface-alt border border-edge rounded-xl">
+            {historyLoading ? (
+              <div className="text-sm text-content-muted py-8 text-center">Loading...</div>
+            ) : historyEvents.length === 0 ? (
+              <div className="text-sm text-content-muted py-8 text-center">
+                No historical events found.
+              </div>
+            ) : (
+              <div className="divide-y divide-edge">
+                {historyEvents.map((e) => (
+                  <div key={e.id} className="flex items-start gap-3 px-4 py-2.5 text-sm">
+                    <Badge className={eventTypeColor(e.event_type)}>{e.event_type}</Badge>
+                    <span className="flex-1 font-mono text-xs truncate" title={e.payload}>
+                      {e.source.slice(0, 8)}
+                    </span>
+                    <span className="text-xs text-content-muted whitespace-nowrap">
+                      {formatTimestamp(e.timestamp)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   );

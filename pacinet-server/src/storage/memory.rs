@@ -6,6 +6,8 @@ use pacinet_core::Storage;
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
+const MAX_MEMORY_EVENTS: usize = 10_000;
+
 /// In-memory storage backend (replaces NodeRegistry from Phase 2).
 pub struct MemoryStorage {
     nodes: RwLock<HashMap<String, Node>>,
@@ -16,6 +18,7 @@ pub struct MemoryStorage {
     deploying: RwLock<HashSet<String>>,
     fsm_definitions: RwLock<HashMap<String, FsmDefinition>>,
     fsm_instances: RwLock<HashMap<String, FsmInstance>>,
+    events: RwLock<Vec<PersistentEvent>>,
 }
 
 impl Default for MemoryStorage {
@@ -29,6 +32,7 @@ impl Default for MemoryStorage {
             deploying: RwLock::new(HashSet::new()),
             fsm_definitions: RwLock::new(HashMap::new()),
             fsm_instances: RwLock::new(HashMap::new()),
+            events: RwLock::new(Vec::new()),
         }
     }
 }
@@ -301,6 +305,51 @@ impl Storage for MemoryStorage {
             .filter(|i| status.as_ref().is_none_or(|s| &i.status == s))
             .cloned()
             .collect())
+    }
+
+    // ---- Event log operations ----
+
+    fn store_event(&self, event: PersistentEvent) -> Result<(), PaciNetError> {
+        let mut events = self.events.write().unwrap();
+        events.push(event);
+        if events.len() > MAX_MEMORY_EVENTS {
+            let drain_count = events.len() - MAX_MEMORY_EVENTS;
+            events.drain(..drain_count);
+        }
+        Ok(())
+    }
+
+    fn query_events(
+        &self,
+        event_type: Option<&str>,
+        source: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
+        limit: u32,
+    ) -> Result<Vec<PersistentEvent>, PaciNetError> {
+        let events = self.events.read().unwrap();
+        let filtered: Vec<PersistentEvent> = events
+            .iter()
+            .rev()
+            .filter(|e| event_type.is_none_or(|t| e.event_type == t))
+            .filter(|e| source.is_none_or(|s| e.source == s))
+            .filter(|e| since.is_none_or(|s| e.timestamp >= s))
+            .filter(|e| until.is_none_or(|u| e.timestamp <= u))
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        Ok(filtered)
+    }
+
+    fn prune_events(&self, older_than: DateTime<Utc>) -> Result<u64, PaciNetError> {
+        let mut events = self.events.write().unwrap();
+        let before = events.len();
+        events.retain(|e| e.timestamp >= older_than);
+        Ok((before - events.len()) as u64)
+    }
+
+    fn count_events(&self) -> Result<u64, PaciNetError> {
+        Ok(self.events.read().unwrap().len() as u64)
     }
 }
 

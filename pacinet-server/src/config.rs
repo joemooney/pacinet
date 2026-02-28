@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -10,6 +12,9 @@ pub struct ControllerConfig {
     pub start_time: Instant,
     pub counter_snapshot_retention: Duration,
     pub counter_snapshot_max_per_node: usize,
+    /// Leader flag: true when this controller is the active leader (or standalone).
+    /// Defaults to true for single-node mode.
+    pub is_leader: Arc<AtomicBool>,
 }
 
 impl Default for ControllerConfig {
@@ -21,6 +26,7 @@ impl Default for ControllerConfig {
             start_time: Instant::now(),
             counter_snapshot_retention: Duration::from_secs(3600),
             counter_snapshot_max_per_node: 120,
+            is_leader: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -30,5 +36,10 @@ impl ControllerConfig {
     pub fn stale_threshold(&self) -> chrono::Duration {
         let secs = self.heartbeat_expect_interval.as_secs() * self.heartbeat_miss_threshold as u64;
         chrono::Duration::seconds(secs as i64)
+    }
+
+    /// Check if this controller is the active leader.
+    pub fn is_leader(&self) -> bool {
+        self.is_leader.load(Ordering::SeqCst)
     }
 }

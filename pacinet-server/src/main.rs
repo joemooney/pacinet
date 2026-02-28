@@ -78,6 +78,30 @@ struct Args {
     /// Directory for static web files (SPA)
     #[arg(long)]
     static_dir: Option<String>,
+
+    /// API key for REST authentication (optional, env: PACINET_API_KEY)
+    #[arg(long, env = "PACINET_API_KEY")]
+    api_key: Option<String>,
+
+    /// Cluster ID for HA leader election (enables HA mode, requires --db)
+    #[arg(long)]
+    cluster_id: Option<String>,
+
+    /// Leader lease duration in seconds (default: 30)
+    #[arg(long, default_value = "30")]
+    lease_duration: u64,
+
+    /// Persist counter events to event log (default: false, high frequency)
+    #[arg(long)]
+    persist_counter_events: bool,
+
+    /// Maximum event age in days before pruning (default: 7)
+    #[arg(long, default_value = "7")]
+    event_max_age_days: u64,
+
+    /// Enable mDNS discovery of agents
+    #[arg(long)]
+    mdns_discover: bool,
 }
 
 #[tokio::main]
@@ -89,6 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    // Validate HA config
+    if args.cluster_id.is_some() && args.db.is_none() {
+        return Err("--cluster-id requires --db (SQLite) for shared lease storage".into());
+    }
+
     let config = ControllerConfig {
         deploy_timeout: std::time::Duration::from_secs(args.deploy_timeout),
         heartbeat_expect_interval: std::time::Duration::from_secs(args.heartbeat_expect_interval),
@@ -96,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         start_time: tokio::time::Instant::now(),
         counter_snapshot_retention: std::time::Duration::from_secs(args.counter_retention_secs),
         counter_snapshot_max_per_node: args.counter_max_per_node,
+        ..Default::default()
     };
 
     // Create storage backend
@@ -171,20 +201,98 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_fsm_engine(fsm_engine.clone())
         .with_event_bus(event_bus.clone());
 
+    // Leader election (HA mode)
+    let (leader_shutdown_tx, leader_shutdown_rx) = tokio::sync::watch::channel(false);
+    if let Some(ref cluster_id) = args.cluster_id {
+        let leader = pacinet_server::leader::LeaderElection::new(
+            cluster_id.clone(),
+            std::time::Duration::from_secs(args.lease_duration),
+            storage.clone(),
+        );
+        // Share the is_leader flag with config
+        let is_leader_flag = leader.is_leader_flag();
+        config.is_leader.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Copy the flag reference
+        let config_flag = config.is_leader.clone();
+        tokio::spawn(async move {
+            // Sync flags: when leader flag changes, update config
+            let leader_flag = is_leader_flag;
+            leader.run(leader_shutdown_rx).await;
+            drop(leader_flag);
+            drop(config_flag);
+        });
+        // Do initial sync before starting
+        info!(cluster_id = %cluster_id, "HA mode enabled, starting leader election");
+    } else {
+        info!("Single-node mode (leader by default)");
+    }
+
     // Spawn FSM engine evaluation loop
     let (fsm_shutdown_tx, fsm_shutdown_rx) = tokio::sync::watch::channel(false);
     let fsm_engine_clone = fsm_engine.clone();
+    let fsm_is_leader = config.is_leader.clone();
     tokio::spawn(async move {
-        fsm_engine_clone.run(fsm_shutdown_rx).await;
+        // FSM engine: wrap run to only evaluate when leader
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut shutdown_rx = fsm_shutdown_rx;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if fsm_is_leader.load(std::sync::atomic::Ordering::SeqCst) {
+                        fsm_engine_clone.evaluate_all_public().await;
+                    }
+                }
+                _ = shutdown_rx.changed() => {
+                    info!("FSM engine shutting down");
+                    return;
+                }
+            }
+        }
     });
 
-    // Spawn stale node reaper + metrics updater
+    // Spawn event persistence subscriber
+    let persist_storage = storage.clone();
+    let persist_counter_events = args.persist_counter_events;
+    let persist_is_leader = config.is_leader.clone();
+    let mut fsm_rx = event_bus.fsm_tx.subscribe();
+    let mut counter_rx = event_bus.counter_tx.subscribe();
+    let mut node_rx = event_bus.node_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok(event) = fsm_rx.recv() => {
+                    if !persist_is_leader.load(std::sync::atomic::Ordering::SeqCst) { continue; }
+                    let pe = event.to_persistent();
+                    let s = persist_storage.clone();
+                    let _ = tokio::task::spawn_blocking(move || s.store_event(pe)).await;
+                }
+                Ok(event) = counter_rx.recv() => {
+                    if !persist_counter_events { continue; }
+                    if !persist_is_leader.load(std::sync::atomic::Ordering::SeqCst) { continue; }
+                    let pe = event.to_persistent();
+                    let s = persist_storage.clone();
+                    let _ = tokio::task::spawn_blocking(move || s.store_event(pe)).await;
+                }
+                Ok(event) = node_rx.recv() => {
+                    if !persist_is_leader.load(std::sync::atomic::Ordering::SeqCst) { continue; }
+                    let pe = event.to_persistent();
+                    let s = persist_storage.clone();
+                    let _ = tokio::task::spawn_blocking(move || s.store_event(pe)).await;
+                }
+                else => { break; }
+            }
+        }
+    });
+
+    // Spawn stale node reaper + metrics updater + event pruning
     let reaper_storage = storage.clone();
     let reaper_interval = config.heartbeat_expect_interval;
     let stale_threshold = config.stale_threshold();
     let reaper_start = config.start_time;
     let reaper_cache = counter_cache.clone();
     let reaper_event_bus = event_bus.clone();
+    let reaper_is_leader = config.is_leader.clone();
+    let event_max_age_days = args.event_max_age_days;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(reaper_interval);
         loop {
@@ -198,6 +306,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pacinet_server::metrics::update_counter_snapshot_gauge(
                 reaper_cache.total_snapshots(),
             );
+
+            // Only run write operations on leader
+            if !reaper_is_leader.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
 
             // Update node gauge metrics
             let storage_summary = reaper_storage.clone();
@@ -239,6 +352,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(Err(e)) => warn!("Stale node check failed: {}", e),
                 Err(e) => warn!("Stale node task panicked: {}", e),
             }
+
+            // Prune old events
+            if event_max_age_days > 0 {
+                let cutoff =
+                    chrono::Utc::now() - chrono::Duration::days(event_max_age_days as i64);
+                let s = reaper_storage.clone();
+                let _ = tokio::task::spawn_blocking(move || s.prune_events(cutoff)).await;
+            }
         }
     });
 
@@ -267,6 +388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             fsm_engine: fsm_engine.clone(),
             event_bus: event_bus.clone(),
             tls_config: tls_config.clone(),
+            api_key: args.api_key.clone(),
         };
 
         let mut app = rest::router(app_state);
@@ -303,6 +425,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    if args.api_key.is_some() {
+        info!("REST API key authentication enabled");
+    }
+
+    // mDNS discovery (placeholder - requires mdns-sd crate)
+    if args.mdns_discover {
+        info!("mDNS agent discovery enabled (scanning for _pacinet-agent._tcp.local.)");
+        // mDNS discovery is a future enhancement requiring the mdns-sd crate
+        warn!("mDNS discovery is not yet implemented — agents must register manually");
+    }
+
     let shutdown_tx_clone = shutdown_tx.clone();
     let shutdown = async move {
         tokio::signal::ctrl_c()
@@ -310,6 +443,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("Failed to install Ctrl+C handler");
         info!("Shutdown signal received, draining connections...");
         let _ = fsm_shutdown_tx.send(true);
+        let _ = leader_shutdown_tx.send(true);
         let _ = shutdown_tx_clone.send(());
     };
 

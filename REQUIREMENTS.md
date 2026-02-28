@@ -130,7 +130,7 @@
 - Created once in main.rs, cloned into services via `with_event_bus()` builder
 - `Option<EventBus>` pattern for backward compatibility (existing tests without event bus still work)
 - Buffer size: 256 per channel (hardcoded)
-- Events are ephemeral — no persistent event log or replay
+- Events persisted to storage via background subscriber (optional counter events via `--persist-counter-events`)
 
 ### 4.2 WatchFsmEvents (stream)
 - Streams FSM transitions, deploy progress, and instance completions
@@ -250,8 +250,12 @@
   - GET/POST/DELETE `/api/fsm/definitions`, `/api/fsm/definitions/:name` — FSM def CRUD
   - GET/POST `/api/fsm/instances`, `/api/fsm/instances/:id` — FSM instance CRUD
   - POST `/api/fsm/instances/:id/advance`, `/api/fsm/instances/:id/cancel` — FSM actions
+  - GET `/api/health` — health check (no auth required), returns status, auth_required, role
+  - GET `/api/events/history` — persistent event log with ?type=&source=&since=&until=&limit= filters
 - Query params: `?label=key%3Dval` for label filters, `?limit=N` for history
+- Auth middleware: validates Bearer token or ?token= query param when API key configured
 - CORS enabled for browser access
+- Leader guards: write endpoints return 503 when controller is standby
 - JSON request/response with serde Serialize/Deserialize types
 
 ### 7.6 SSE (Server-Sent Events)
@@ -268,6 +272,13 @@
 - When static dir not found, REST API still works (dev mode)
 
 ## 8. Security
+
+### 8.0 API Key Authentication
+- Optional API key for REST API via `--api-key` or `PACINET_API_KEY` env var
+- Validated via `Authorization: Bearer <key>` header or `?token=<key>` query param (for SSE)
+- `/api/health` exempt from auth (for load balancer probes)
+- When no key configured, all requests pass (backward compatible)
+- React SPA: stores key in localStorage, prompts on 401 via custom event
 
 ### 8.1 Mutual TLS (mTLS)
 - Optional mTLS on all gRPC channels
@@ -327,6 +338,30 @@
 
 ## 11. Non-Functional Requirements
 
+### 11.0 Persistent Event Log
+- `PersistentEvent` model: id, event_type, source, payload (JSON), timestamp
+- Storage trait extensions: store_event, query_events (with type/source/since/until/limit filters), prune_events, count_events
+- Default implementations for backward compatibility
+- SQLite: events table with indexes on timestamp DESC and event_type
+- MemoryStorage: Vec with 10,000 event cap
+- Background subscriber converts EventBus events to PersistentEvent via `to_persistent()` methods
+- Counter events optionally persisted via `--persist-counter-events` flag (default off, high frequency)
+- Event pruning in reaper loop via `--event-max-age-days` (default 7)
+- REST endpoint: GET /api/events/history with type/source/since/until/limit query params
+- React: History tab on WatchPage with `useEventHistory()` hook
+
+### 11.0b Multi-Controller HA
+- Lease-based leader election using SQLite `leader_lease` table
+- Single-row pattern with CHECK (id = 1) constraint
+- Atomic acquisition via `BEGIN IMMEDIATE` transaction
+- Lease renewal at lease_duration/2 (default 30s lease)
+- `Arc<AtomicBool>` is_leader flag shared between LeaderElection and ControllerConfig
+- Leader guards on: REST write endpoints (503 for standby), gRPC write ops, FSM evaluation, event persistence, stale reaper
+- MemoryStorage always returns true for leader acquisition (single-node default)
+- `/api/health` returns `role: "leader"` or `role: "standby"`
+- CLI flags: `--cluster-id` (enables HA), `--lease-duration` (seconds, default 30)
+- Requires `--db` when `--cluster-id` is set (validation at startup)
+
 ### 11.1 Storage
 - Storage trait (`Arc<dyn Storage>`) for backend abstraction
 - MemoryStorage: in-memory with RwLock (default for dev/test)
@@ -359,6 +394,17 @@
 - Unit tests for MemoryStorage (9 tests: register, remove, filter, state transitions, invalid transition, concurrent deploy, policy versioning, deployment audit, stale detection)
 - Unit tests for SqliteStorage (9 tests mirroring MemoryStorage, using in-memory SQLite)
 - Unit tests for PacGate JSON parsing and mock backend
+- REST integration tests (17 tests):
+  - Node CRUD: list empty, list/get, 404, delete
+  - Fleet status with label filter
+  - Policy, deploy history (404 cases)
+  - FSM definitions CRUD, instance 404
+  - Health endpoint (no auth required)
+  - Auth: 401 without key, 200 with Bearer, 200 with ?token=, no auth when no key configured
+  - SSE node events via EventBus
+  - Event history with filters
+  - Deploy 404 (node not found)
+  - Aggregate counters empty
 - Integration tests using ephemeral ports:
   - Full happy path: register → deploy → counters → query
   - Deploy to unreachable agent: graceful failure, node state = Error
@@ -392,28 +438,37 @@
 
 ### 12.1 Technology Stack
 - React 19 + TypeScript 5.8 + Vite 6
-- Tailwind CSS 4 (dark/light theme, identical to aida-web-react)
+- Tailwind CSS 4 (dark/light theme with localStorage persistence, identical to aida-web-react)
 - TanStack React Query 5 for data fetching and caching
 - React Router DOM 7 for SPA routing
+- recharts 2 for interactive charts (PieChart, LineChart)
 - lucide-react for icons
 - Inter + JetBrains Mono fonts
 
 ### 12.2 Pages
-- **Dashboard** (`/`): fleet metrics cards, donut chart (CSS conic-gradient), live event feed, FSM summary
-- **Nodes** (`/nodes`): filterable table, click-to-detail panel with policy, counters, deploy history, remove action
+- **Dashboard** (`/`): fleet metrics cards, recharts PieChart (interactive with tooltips), live event feed, FSM summary
+- **Nodes** (`/nodes`): filterable table or grid view (toggle), sortable columns, click-to-detail panel with policy, counters, deploy history, remove action
 - **Deploy** (`/deploy`): single/batch mode toggle, YAML textarea, compile options, result display
-- **Counters** (`/counters`): node selector, counter table with live rates via SSE, aggregate view
+- **Counters** (`/counters`): node selector, counter rate line chart (recharts), counter table with live rates via SSE, aggregate view
 - **FSM** (`/fsm`): tabbed view — definitions (CRUD from YAML) and instances (start/advance/cancel, transition timeline)
-- **Watch** (`/watch`): combined live event feed from all 3 SSE streams, type/text filters, auto-scroll
+- **Watch** (`/watch`): Live/History tab toggle. Live: combined SSE feed with type/text filters, auto-scroll. History: persistent event log with type/source/limit filters via REST
 
 ### 12.3 Real-Time Updates
-- SSE (Server-Sent Events) via EventSource API for live data
+- SSE (Server-Sent Events) via EventSource API for live data, with ?token= auth support
 - React Query with 5s refetch interval for REST data
 - Pause-on-hover for auto-scrolling event feeds
 
-### 12.4 Build & Dev Workflow
+### 12.4 Authentication
+- API key stored in localStorage, attached as Authorization: Bearer header on all REST requests
+- SSE connections append ?token= query param
+- 401 responses dispatch `pacinet:auth-required` custom event
+- ApiKeyPrompt modal shown on auth-required event
+- Successful auth invalidates all React Query caches for refresh
+
+### 12.5 Build & Dev Workflow
 - `make web-install` — install npm dependencies
 - `make web-dev` — Vite dev server on :5174 (proxies /api → :8081)
 - `make web-build` — build to pacinet-web/dist/
 - `make run-server-web` — server with built SPA on :8081
+- `make run-server-auth` — server with API key auth enabled
 - Production: build React, serve from `--static-dir`

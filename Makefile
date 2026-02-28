@@ -1,4 +1,4 @@
-.PHONY: build check test clean fmt clippy run-server run-server-sqlite run-server-tls run-agent run-agent-tls node-list status integration-test test-all gen-certs web-install web-dev web-build run-server-web
+.PHONY: build check test clean fmt clippy run-server run-server-sqlite run-server-tls run-agent run-agent-tls node-list status integration-test rest-test test-all gen-certs web-install web-dev web-build run-server-web run-server-auth run-server-ha
 
 build:
 	cargo build
@@ -48,6 +48,9 @@ status:
 integration-test:
 	cargo test --test integration -p pacinet-server
 
+rest-test:
+	cargo test --test rest_integration -p pacinet-server
+
 test-all:
 	cargo test --workspace
 	cargo clippy --workspace -- -D warnings
@@ -63,3 +66,9 @@ web-build:
 
 run-server-web:
 	cargo run -p pacinet-server -- --port 50054 --web-port 8081 --static-dir pacinet-web/dist
+
+run-server-auth:
+	cargo run -p pacinet-server -- --port 50054 --web-port 8081 --static-dir pacinet-web/dist --api-key mysecret
+
+run-server-ha:
+	cargo run -p pacinet-server -- --port 50054 --web-port 8081 --static-dir pacinet-web/dist --db pacinet.db --cluster-id c1

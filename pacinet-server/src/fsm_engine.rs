@@ -60,6 +60,11 @@ impl FsmEngine {
         }
     }
 
+    /// Public entry point for external evaluation (used by main.rs with leader check).
+    pub async fn evaluate_all_public(&self) {
+        self.evaluate_all().await;
+    }
+
     async fn evaluate_all(&self) {
         let instances = match blocking(&self.storage, |s| {
             s.list_fsm_instances(None, Some(FsmInstanceStatus::Running))

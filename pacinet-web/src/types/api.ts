@@ -159,6 +159,22 @@ export interface AdvanceFsmResponse {
   message: string;
 }
 
+// Persistent event log
+export interface PersistentEventJson {
+  id: string;
+  event_type: string;
+  source: string;
+  payload: string;
+  timestamp: string;
+}
+
+// Health
+export interface HealthResponse {
+  status: string;
+  auth_required: boolean;
+  role: string;
+}
+
 // SSE event types
 export interface NodeEventJson {
   event_type: string;

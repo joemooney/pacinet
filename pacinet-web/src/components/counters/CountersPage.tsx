@@ -5,6 +5,7 @@ import { useCounterEvents } from '../../hooks/useEvents';
 import Card from '../ui/Card';
 import Table from '../ui/Table';
 import Spinner from '../ui/Spinner';
+import CounterRateChart from './CounterRateChart';
 
 export default function CountersPage() {
   const [selectedNode, setSelectedNode] = useState('');
@@ -51,6 +52,13 @@ export default function CountersPage() {
           </div>
         )}
       </div>
+
+      {/* Counter rate chart */}
+      {counterEvents.length > 0 && (
+        <Card title="Counter Rates (matches/s)">
+          <CounterRateChart events={counterEvents} />
+        </Card>
+      )}
 
       {/* Single node counters */}
       {selectedNode && (

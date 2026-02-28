@@ -82,3 +82,23 @@ CREATE TABLE IF NOT EXISTS fsm_instances (
 
 CREATE INDEX IF NOT EXISTS idx_fsm_instances_status ON fsm_instances(status);
 CREATE INDEX IF NOT EXISTS idx_fsm_instances_def ON fsm_instances(definition_name);
+
+-- Phase 8: Event log
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    timestamp TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+
+-- Phase 8: Leader lease for HA
+CREATE TABLE IF NOT EXISTS leader_lease (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    controller_id TEXT NOT NULL,
+    lease_expires_at TEXT NOT NULL,
+    acquired_at TEXT NOT NULL
+);

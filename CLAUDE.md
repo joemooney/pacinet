@@ -3,7 +3,10 @@
 ## Feature Summary
 - **SDN controller** managing multiple PacGate FPGA packet filter nodes
 - **gRPC-based** architecture: controller (southbound + northbound), agent, CLI
-- **Web dashboard**: React SPA with REST API, SSE real-time streaming, fleet visualization
+- **Web dashboard**: React SPA with REST API, SSE real-time streaming, fleet visualization, recharts, auth
+- **API authentication**: optional API key auth (Bearer header + ?token= query param for SSE)
+- **Persistent event log**: events stored in SQLite/memory, queryable via REST with type/source/time filters
+- **Multi-controller HA**: lease-based leader election via SQLite, leader guards on write operations
 - **Node lifecycle**: registration, heartbeat, policy deployment, counter collection
 - **End-to-end deployment**: CLI → Controller → Agent → PacGate
 - **YAML-defined FSM engine**: operator-defined deployment state machines (canary, staged, rollback)
@@ -24,7 +27,7 @@
 - **mTLS security**: optional mutual TLS on all gRPC channels (server, agent, CLI)
 - **Prometheus metrics**: operational metrics on configurable HTTP endpoint
 - **Graceful shutdown**: signal handling, connection draining, heartbeat loop cancellation
-- **Health checks**: gRPC health service via tonic-health
+- **Health checks**: gRPC health service via tonic-health, REST /api/health endpoint
 - **CI pipeline**: GitHub Actions (check, clippy, test, fmt)
 
 ## Architecture
@@ -68,11 +71,14 @@ make run-server                # Start controller on :50054 (in-memory)
 make run-server-sqlite         # Start controller on :50054 (SQLite)
 make run-server-tls            # Start with mTLS + SQLite + metrics
 make run-server-web            # Start with web dashboard on :8081
+make run-server-auth           # Start with web dashboard + API key auth
+make run-server-ha             # Start with HA leader election (SQLite required)
 make run-agent                 # Start agent, connect to controller (plain)
 make run-agent-tls             # Start agent with mTLS
 make gen-certs                 # Generate dev TLS certificates
 make node-list                 # List nodes via CLI
 make integration-test          # Run integration tests only
+make rest-test                 # Run REST integration tests only
 make test-all                  # Run tests + clippy
 make web-install               # Install React app dependencies
 make web-dev                   # Start Vite dev server on :5174
@@ -114,8 +120,13 @@ make web-build                 # Build React app to pacinet-web/dist/
 - **SSE endpoints**: `async_stream::stream!` macro with broadcast channel subscriptions; `RecvError::Lagged` logs and continues
 - **Static file serving**: `tower_http::services::ServeDir` with `ServeFile` fallback for SPA routing
 - **Dual server**: gRPC (tonic) on :50054 and REST (axum) on :8081, sharing state, coordinated shutdown via `broadcast::<()>`
-- **React SPA**: React 19 + TypeScript + Vite 6 + Tailwind CSS 4 + TanStack React Query + React Router DOM 7
+- **React SPA**: React 19 + TypeScript + Vite 6 + Tailwind CSS 4 + TanStack React Query + React Router DOM 7 + recharts 2
 - **Web dev workflow**: Vite dev server on :5174 proxies `/api` to :8081; production serves built SPA from `pacinet-web/dist/`
+- **API key auth**: optional `--api-key` / `PACINET_API_KEY` env var; axum middleware checks `Authorization: Bearer` header or `?token=` query param; `/api/health` exempt from auth; React stores key in localStorage, prompts on 401
+- **Persistent event log**: `PersistentEvent` model with event_type, source, payload, timestamp; Storage trait with store/query/prune/count methods; subscriber converts EventBus events to persistent records; configurable `--event-max-age-days` pruning
+- **Leader election** (`leader.rs`): lease-based via SQLite `leader_lease` table; `BEGIN IMMEDIATE` transactions for atomic acquisition; renewal at lease_duration/2; `Arc<AtomicBool>` is_leader flag shared with config
+- **Leader guards**: REST write endpoints return 503 when standby; gRPC write operations blocked; FSM engine skips evaluation; reaper skips on standby
+- **Dashboard enhancements**: recharts PieChart (StatusChart), LineChart (CounterRateChart), sortable Table, NodeGrid card view, event history tab on WatchPage, dark mode persistence in localStorage
 
 ## Port Assignments
 - Controller gRPC: 50054

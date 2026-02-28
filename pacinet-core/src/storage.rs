@@ -4,6 +4,9 @@ use crate::model::*;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
+/// Leader lease info: (controller_id, lease_expires_at)
+pub type LeaderInfo = (String, DateTime<Utc>);
+
 /// Summary of fleet status: (total_nodes, nodes_by_state, oldest_heartbeat)
 pub type StatusSummary = (usize, HashMap<String, usize>, Option<DateTime<Utc>>);
 
@@ -128,4 +131,49 @@ pub trait Storage: Send + Sync {
         def_name: Option<&str>,
         status: Option<FsmInstanceStatus>,
     ) -> Result<Vec<FsmInstance>, PaciNetError>;
+
+    // ---- Event log operations (default no-op for backward compatibility) ----
+
+    /// Store a persistent event.
+    fn store_event(&self, _event: PersistentEvent) -> Result<(), PaciNetError> {
+        Ok(())
+    }
+
+    /// Query persistent events with optional filters.
+    fn query_events(
+        &self,
+        _event_type: Option<&str>,
+        _source: Option<&str>,
+        _since: Option<DateTime<Utc>>,
+        _until: Option<DateTime<Utc>>,
+        _limit: u32,
+    ) -> Result<Vec<PersistentEvent>, PaciNetError> {
+        Ok(vec![])
+    }
+
+    /// Prune events older than the given timestamp. Returns count deleted.
+    fn prune_events(&self, _older_than: DateTime<Utc>) -> Result<u64, PaciNetError> {
+        Ok(0)
+    }
+
+    /// Count total events.
+    fn count_events(&self) -> Result<u64, PaciNetError> {
+        Ok(0)
+    }
+
+    // ---- Leader lease operations (default: always leader for single-node) ----
+
+    /// Try to acquire or renew the leader lease. Returns true if acquired.
+    fn try_acquire_lease(
+        &self,
+        _controller_id: &str,
+        _duration_secs: u64,
+    ) -> Result<bool, PaciNetError> {
+        Ok(true)
+    }
+
+    /// Get current leader info.
+    fn get_leader(&self) -> Result<Option<LeaderInfo>, PaciNetError> {
+        Ok(None)
+    }
 }

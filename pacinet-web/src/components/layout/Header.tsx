@@ -1,7 +1,9 @@
 import { useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { RefreshCw, Sun, Moon } from 'lucide-react';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+
+const THEME_KEY = 'pacinet_theme';
 
 const titles: Record<string, string> = {
   '/': 'Dashboard',
@@ -15,13 +17,18 @@ const titles: Record<string, string> = {
 export default function Header() {
   const location = useLocation();
   const queryClient = useQueryClient();
-  const [dark, setDark] = useState(true);
+  const [dark, setDark] = useState(() => {
+    const saved = localStorage.getItem(THEME_KEY);
+    return saved !== 'light';
+  });
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('light', !dark);
+    localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light');
+  }, [dark]);
 
   const toggleTheme = useCallback(() => {
-    setDark((d) => {
-      document.documentElement.classList.toggle('light', d);
-      return !d;
-    });
+    setDark((d) => !d);
   }, []);
 
   const title = titles[location.pathname] || 'PaciNet';

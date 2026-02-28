@@ -1,6 +1,8 @@
 //! Domain event types and broadcast channel wrapper for streaming RPCs.
 
 use chrono::{DateTime, Utc};
+use pacinet_core::PersistentEvent;
+use serde::Serialize;
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
@@ -41,7 +43,7 @@ impl EventBus {
 }
 
 /// FSM lifecycle events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum FsmEvent {
     Transition {
         instance_id: String,
@@ -76,10 +78,37 @@ impl FsmEvent {
             FsmEvent::InstanceCompleted { instance_id, .. } => instance_id,
         }
     }
+
+    pub fn to_persistent(&self) -> PersistentEvent {
+        let (event_type, source, timestamp) = match self {
+            FsmEvent::Transition {
+                instance_id,
+                timestamp,
+                ..
+            } => ("fsm.transition", instance_id.as_str(), *timestamp),
+            FsmEvent::DeployProgress {
+                instance_id,
+                timestamp,
+                ..
+            } => ("fsm.deploy_progress", instance_id.as_str(), *timestamp),
+            FsmEvent::InstanceCompleted {
+                instance_id,
+                timestamp,
+                ..
+            } => ("fsm.completed", instance_id.as_str(), *timestamp),
+        };
+        PersistentEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            event_type: event_type.to_string(),
+            source: source.to_string(),
+            payload: serde_json::to_string(self).unwrap_or_default(),
+            timestamp,
+        }
+    }
 }
 
 /// Counter update event with calculated rates.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CounterEvent {
     pub node_id: String,
     pub counters: Vec<CounterRateData>,
@@ -87,7 +116,7 @@ pub struct CounterEvent {
 }
 
 /// Per-rule counter data with rates.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CounterRateData {
     pub rule_name: String,
     pub match_count: u64,
@@ -97,7 +126,7 @@ pub struct CounterRateData {
 }
 
 /// Node lifecycle events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum NodeEvent {
     Registered {
         node_id: String,
@@ -127,6 +156,18 @@ pub enum NodeEvent {
     },
 }
 
+impl CounterEvent {
+    pub fn to_persistent(&self) -> PersistentEvent {
+        PersistentEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            event_type: "counter.update".to_string(),
+            source: self.node_id.clone(),
+            payload: serde_json::to_string(self).unwrap_or_default(),
+            timestamp: self.collected_at,
+        }
+    }
+}
+
 impl NodeEvent {
     pub fn node_id(&self) -> &str {
         match self {
@@ -143,6 +184,30 @@ impl NodeEvent {
             NodeEvent::StateChanged { labels, .. } => labels,
             NodeEvent::HeartbeatStale { labels, .. } => labels,
             NodeEvent::Removed { labels, .. } => labels,
+        }
+    }
+
+    pub fn to_persistent(&self) -> PersistentEvent {
+        let (event_type, node_id, timestamp) = match self {
+            NodeEvent::Registered {
+                node_id, timestamp, ..
+            } => ("node.registered", node_id.as_str(), *timestamp),
+            NodeEvent::StateChanged {
+                node_id, timestamp, ..
+            } => ("node.state_changed", node_id.as_str(), *timestamp),
+            NodeEvent::HeartbeatStale {
+                node_id, timestamp, ..
+            } => ("node.heartbeat_stale", node_id.as_str(), *timestamp),
+            NodeEvent::Removed {
+                node_id, timestamp, ..
+            } => ("node.removed", node_id.as_str(), *timestamp),
+        };
+        PersistentEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            event_type: event_type.to_string(),
+            source: node_id.to_string(),
+            payload: serde_json::to_string(self).unwrap_or_default(),
+            timestamp,
         }
     }
 }

@@ -658,6 +658,229 @@ impl Storage for SqliteStorage {
 
         Ok(instances)
     }
+
+    // ---- Event log operations ----
+
+    fn store_event(&self, event: PersistentEvent) -> Result<(), PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO events (id, event_type, source, payload, timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                &event.id,
+                &event.event_type,
+                &event.source,
+                &event.payload,
+                event.timestamp.to_rfc3339(),
+            ],
+        )
+        .map_err(|e| PaciNetError::Internal(format!("Failed to store event: {}", e)))?;
+        Ok(())
+    }
+
+    fn query_events(
+        &self,
+        event_type: Option<&str>,
+        source: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
+        limit: u32,
+    ) -> Result<Vec<PersistentEvent>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut conditions = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+
+        if let Some(et) = event_type {
+            conditions.push(format!("event_type = ?{}", idx));
+            params.push(Box::new(et.to_string()));
+            idx += 1;
+        }
+        if let Some(src) = source {
+            conditions.push(format!("source = ?{}", idx));
+            params.push(Box::new(src.to_string()));
+            idx += 1;
+        }
+        if let Some(s) = since {
+            conditions.push(format!("timestamp >= ?{}", idx));
+            params.push(Box::new(s.to_rfc3339()));
+            idx += 1;
+        }
+        if let Some(u) = until {
+            conditions.push(format!("timestamp <= ?{}", idx));
+            params.push(Box::new(u.to_rfc3339()));
+            idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT id, event_type, source, payload, timestamp FROM events {} ORDER BY timestamp DESC LIMIT ?{}",
+            where_clause, idx
+        );
+        params.push(Box::new(limit as i64));
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let events: Vec<PersistentEvent> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let id: String = row.get(0)?;
+                let event_type: String = row.get(1)?;
+                let source: String = row.get(2)?;
+                let payload: String = row.get(3)?;
+                let ts_str: String = row.get(4)?;
+                Ok((id, event_type, source, payload, ts_str))
+            })
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, event_type, source, payload, ts_str)| {
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                    .ok()?
+                    .with_timezone(&Utc);
+                Some(PersistentEvent {
+                    id,
+                    event_type,
+                    source,
+                    payload,
+                    timestamp,
+                })
+            })
+            .collect();
+
+        Ok(events)
+    }
+
+    fn prune_events(&self, older_than: DateTime<Utc>) -> Result<u64, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                "DELETE FROM events WHERE timestamp < ?1",
+                rusqlite::params![older_than.to_rfc3339()],
+            )
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        Ok(affected as u64)
+    }
+
+    fn count_events(&self) -> Result<u64, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        Ok(count as u64)
+    }
+
+    // ---- Leader lease operations ----
+
+    fn try_acquire_lease(
+        &self,
+        controller_id: &str,
+        duration_secs: u64,
+    ) -> Result<bool, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::seconds(duration_secs as i64);
+
+        // Use BEGIN IMMEDIATE for atomic read-modify-write
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        let result = (|| -> Result<bool, PaciNetError> {
+            let existing: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT controller_id, lease_expires_at FROM leader_lease WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+            match existing {
+                None => {
+                    // No lease exists — acquire it
+                    conn.execute(
+                        "INSERT INTO leader_lease (id, controller_id, lease_expires_at, acquired_at) VALUES (1, ?1, ?2, ?3)",
+                        rusqlite::params![controller_id, expires_at.to_rfc3339(), now.to_rfc3339()],
+                    )
+                    .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+                    Ok(true)
+                }
+                Some((existing_id, expires_str)) => {
+                    if existing_id == controller_id {
+                        // We hold the lease — renew it
+                        conn.execute(
+                            "UPDATE leader_lease SET lease_expires_at = ?1, acquired_at = ?2 WHERE id = 1",
+                            rusqlite::params![expires_at.to_rfc3339(), now.to_rfc3339()],
+                        )
+                        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+                        Ok(true)
+                    } else {
+                        // Check if lease expired
+                        let lease_expires = DateTime::parse_from_rfc3339(&expires_str)
+                            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+                            .with_timezone(&Utc);
+                        if now > lease_expires {
+                            // Expired — take over
+                            conn.execute(
+                                "UPDATE leader_lease SET controller_id = ?1, lease_expires_at = ?2, acquired_at = ?3 WHERE id = 1",
+                                rusqlite::params![controller_id, expires_at.to_rfc3339(), now.to_rfc3339()],
+                            )
+                            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+                            Ok(true)
+                        } else {
+                            Ok(false)
+                        }
+                    }
+                }
+            }
+        })();
+
+        match &result {
+            Ok(_) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+            }
+            Err(_) => {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+
+        result
+    }
+
+    fn get_leader(&self) -> Result<Option<(String, DateTime<Utc>)>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .query_row(
+                "SELECT controller_id, lease_expires_at FROM leader_lease WHERE id = 1",
+                [],
+                |row| {
+                    let id: String = row.get(0)?;
+                    let expires: String = row.get(1)?;
+                    Ok((id, expires))
+                },
+            )
+            .optional()
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        match result {
+            None => Ok(None),
+            Some((id, expires_str)) => {
+                let expires = DateTime::parse_from_rfc3339(&expires_str)
+                    .map_err(|e| PaciNetError::Internal(e.to_string()))?
+                    .with_timezone(&Utc);
+                Ok(Some((id, expires)))
+            }
+        }
+    }
 }
 
 // Helper functions to convert rusqlite rows to domain types

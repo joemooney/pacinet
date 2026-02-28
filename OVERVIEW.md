@@ -47,9 +47,9 @@ PaciNet follows a classic SDN controller architecture:
 
 ### Key Components
 
-1. **pacinet-server** — The central controller. Receives agent registrations, stores node state (in-memory or SQLite), handles policy deployment, batch deploy, fleet status, policy history, rollback, and forwards deploy requests to agents. Includes stale node reaper, FSM evaluation engine (background loop for YAML-defined deployment and adaptive policy state machines), counter snapshot cache (in-memory ring buffer for rate tracking), webhook delivery for alert actions, EventBus with broadcast channels for real-time streaming (FSM transitions, counter updates, node lifecycle events), Prometheus metrics endpoint, gRPC health service, and axum REST API with SSE endpoints for the web dashboard. Supports mTLS on gRPC channels.
+1. **pacinet-server** — The central controller. Receives agent registrations, stores node state (in-memory or SQLite), handles policy deployment, batch deploy, fleet status, policy history, rollback, and forwards deploy requests to agents. Includes stale node reaper, FSM evaluation engine (background loop for YAML-defined deployment and adaptive policy state machines), counter snapshot cache (in-memory ring buffer for rate tracking), webhook delivery for alert actions, EventBus with broadcast channels for real-time streaming (FSM transitions, counter updates, node lifecycle events), persistent event log (events stored in storage for historical query), leader election for multi-controller HA (lease-based via SQLite), API key authentication on REST endpoints, Prometheus metrics endpoint, gRPC health service, and axum REST API with SSE endpoints for the web dashboard. Supports mTLS on gRPC channels.
 
-6. **pacinet-web** — React SPA dashboard (not a Rust crate). Provides browser-based fleet visibility: dashboard with live metrics, node management, policy deployment, counter monitoring, FSM management, and real-time event streaming via SSE. Built with React 19, TypeScript, Vite 6, Tailwind CSS 4, TanStack React Query, and React Router DOM 7. Styled identically to the aida-web-react project (dark/light theme, Inter + JetBrains Mono fonts).
+6. **pacinet-web** — React SPA dashboard (not a Rust crate). Provides browser-based fleet visibility: dashboard with live metrics (recharts PieChart/LineChart), node management (table/grid views, sortable columns), policy deployment, counter monitoring with rate charts, FSM management, real-time event streaming via SSE, event history browser, and API key authentication prompt. Built with React 19, TypeScript, Vite 6, Tailwind CSS 4, TanStack React Query, React Router DOM 7, and recharts 2. Styled identically to the aida-web-react project (dark/light theme with localStorage persistence, Inter + JetBrains Mono fonts).
 
 2. **pacinet-agent** — Runs on each PacGate node. Registers with the controller on startup, sends periodic heartbeats with retry/backoff, handles rule deployment by invoking the `pacgate` CLI, auto-detects PacGate version, reports counters and CPU usage. Supports graceful shutdown and mTLS.
 
@@ -107,25 +107,23 @@ Development certificates can be generated with `make gen-certs` (requires openss
 - **React 19** + **TypeScript** + **Vite 6** + **Tailwind CSS 4** for web dashboard
 - **TanStack React Query 5** for data fetching and caching
 - **React Router DOM 7** for SPA routing
+- **recharts 2** for interactive charts (PieChart, LineChart)
 - **lucide-react** for icons
 
 ## Current Status
 
-**Phase 7 complete** — Web dashboard with REST API and SSE real-time streaming:
-- **REST API**: axum 0.8 router with 20+ endpoints for nodes, fleet, counters, deploy, FSM definitions/instances
-- **SSE endpoints**: 3 Server-Sent Events streams (nodes, counters, FSM) from shared EventBus
-- **React SPA**: 6 pages — Dashboard, Nodes, Deploy, Counters, FSM, Watch
-- **Dashboard**: fleet metrics cards, donut chart (CSS conic-gradient), live event feed, FSM summary
-- **Node management**: filterable table, detail panel with policy, counters, deploy history
-- **Deploy interface**: single/batch mode, YAML editor, compile options
-- **Counter monitoring**: per-node tables with live rates via SSE
-- **FSM management**: definition CRUD, instance lifecycle (start/advance/cancel), transition timeline
-- **Watch page**: combined live event feed with type filters and auto-scroll
-- **Dual server**: gRPC on :50054 + REST on :8081, sharing state, coordinated shutdown
-- **Static file serving**: SPA fallback for production; Vite proxy for development
-- 93 tests (32 core, 30 server unit, 10 agent, 21 integration) all passing, clippy clean
+**Phase 8 complete** — REST tests, auth, event log, HA, dashboard enhancements:
+- **REST integration tests**: 17 tests covering all REST endpoints, auth, SSE, event history
+- **API key authentication**: optional Bearer token / ?token= query param, React auth prompt on 401
+- **Persistent event log**: events stored in SQLite/memory, queryable via /api/events/history with filters
+- **Multi-controller HA**: lease-based leader election via SQLite, leader guards on write operations
+- **Dashboard enhancements**: recharts PieChart/LineChart, sortable tables, node grid view, event history tab, dark mode persistence
+- **mDNS placeholder**: --mdns-discover flag with runtime message (full mdns-sd integration deferred)
+- **Health endpoint**: /api/health (no auth required) with status, auth_required, role
+- 110 tests (32 core, 30 server unit, 10 agent, 21 integration, 17 REST integration) all passing, clippy clean
 
 Previous phases:
+- Phase 7: Web dashboard with REST API, SSE streaming, React SPA
 - Phase 6: gRPC server-side streaming, EventBus, CLI watch commands
 - Phase 5b: Counter rate tracking & adaptive policy FSMs, webhook delivery
 - Phase 5: YAML-defined FSM engine for deployment orchestration

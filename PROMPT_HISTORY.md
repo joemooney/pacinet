@@ -607,3 +607,99 @@ Implement Phase 7: Web dashboard with REST API and React SPA. Add axum REST API 
 ### Git Operations
 - Committed Phase 7 changes
 - Pushed to GitHub
+
+## Session 9 — REST Tests, Auth, Event Log, HA, Dashboard Enhancements (Phase 8) (2026-02-28)
+
+### Prompt
+Implement Phase 8: REST API integration tests, authentication/authorization, persistent event log, agent auto-discovery (mDNS), multi-controller HA, and dashboard enhancements.
+
+### Actions Taken
+
+#### 1. REST API Integration Tests (`pacinet-server/tests/rest_integration.rs`) — NEW
+- Test helper `start_rest_server()` starts both gRPC + axum on ephemeral ports sharing same AppState
+- Uses `reqwest` as HTTP client with `register_node()` helper
+- 17 tests covering all REST endpoints:
+  - Node CRUD: list empty, list/get node, 404, delete
+  - Fleet status with label filter
+  - Policy/deploy history 404 cases
+  - FSM definitions CRUD, instance 404
+  - Health endpoint (no auth needed)
+  - Auth: 401 without key, 200 with Bearer, 200 with ?token= query param, no auth when no key
+  - SSE node events via EventBus with timeout
+  - Event history with filters
+  - Deploy 404 (node not found), aggregate counters empty
+
+#### 2. Authentication/Authorization
+- **rest.rs**: Added `api_key: Option<String>` to AppState, auth middleware checking `Authorization: Bearer` header and `?token=` query param, split router into health_routes (no auth) and api_routes (with auth middleware)
+- **main.rs**: Added `--api-key` CLI arg with `PACINET_API_KEY` env var support
+- **client.ts**: Auth helpers (getApiKey, setApiKey, clearApiKey using localStorage), Authorization header on all requests, 401 dispatches `pacinet:auth-required` custom event
+- **ApiKeyPrompt.tsx** (new): Modal component for API key input
+- **App.tsx**: Listens for auth-required event, shows ApiKeyPrompt, invalidates queries on auth
+- **useEvents.ts**: SSE URLs now include `?token=` query param when API key is stored
+
+#### 3. Persistent Event Log
+- **model.rs**: Added `PersistentEvent` struct (id, event_type, source, payload, timestamp)
+- **storage.rs**: Extended Storage trait with store_event, query_events, prune_events, count_events (default implementations)
+- **sqlite.rs**: Full implementation with events table, indexed queries, parameterized SQL
+- **memory.rs**: Vec-based implementation with MAX_MEMORY_EVENTS = 10,000 cap
+- **schema.sql**: events table with indexes on timestamp DESC and event_type
+- **events.rs**: Added Serialize derive to FsmEvent, CounterEvent, NodeEvent; added to_persistent() methods
+- **main.rs**: Background subscriber task (tokio::select! on 3 broadcast channels), configurable --persist-counter-events and --event-max-age-days
+- **rest.rs**: GET /api/events/history endpoint with type/source/since/until/limit filters
+- **types/api.ts**: Added PersistentEventJson, HealthResponse types
+- **useEvents.ts**: Added useEventHistory() hook
+- **WatchPage.tsx**: Live/History tab toggle with history filters
+
+#### 4. Agent Auto-Discovery (mDNS) — Placeholder
+- Added --mdns-discover CLI flag to server main.rs
+- Runtime warning message when flag is set (full mdns-sd integration deferred)
+- Primary validation through manual testing as planned
+
+#### 5. Multi-Controller HA
+- **leader.rs** (new): LeaderElection struct with lease-based election, background renewal loop, AtomicBool is_leader flag
+- **storage.rs**: Added try_acquire_lease and get_leader to Storage trait with defaults
+- **sqlite.rs**: Implemented with BEGIN IMMEDIATE transactions on leader_lease table
+- **schema.sql**: Added leader_lease table with CHECK (id = 1) constraint
+- **config.rs**: Added is_leader field (Arc<AtomicBool>, default true), is_leader() method
+- **rest.rs**: Added require_leader() helper, leader guards on all write endpoints (503 for standby), /api/health returns role
+- **main.rs**: Added --cluster-id and --lease-duration args, validation (cluster-id requires --db), leader election startup, FSM engine external loop with leader check
+
+#### 6. Dashboard Enhancements
+- **package.json**: Added recharts ^2.15.0 dependency
+- **CounterRateChart.tsx** (new): recharts LineChart with time X-axis, rate Y-axis, per-rule lines
+- **NodeGrid.tsx** (new): Card grid view with hostname, state badge, heartbeat age, policy hash, uptime
+- **Table.tsx**: Added sortable prop with column click sorting, ChevronUp/ChevronDown indicators
+- **StatusChart.tsx**: Replaced CSS conic-gradient with recharts PieChart (interactive tooltips)
+- **Header.tsx**: Dark mode persistence via localStorage (pacinet_theme key)
+- **NodesPage.tsx**: Table/Grid view toggle, sortable columns
+- **CountersPage.tsx**: Counter rate chart above counter tables
+- **WatchPage.tsx**: Live/History tab toggle, history filters (type, source, limit)
+
+#### 7. Infrastructure
+- **Makefile**: Added rest-test, run-server-auth, run-server-ha targets
+- **Cargo.toml**: Added "env" feature to clap for PACINET_API_KEY env var support
+
+### Errors Encountered & Fixed
+- **clap `env` feature missing**: `#[arg(env = "PACINET_API_KEY")]` requires clap's `env` feature. Fixed by adding `"env"` to clap features in workspace Cargo.toml.
+- **cfg feature warning for mdns**: `unexpected cfg condition value: 'mdns'`. Replaced compile-time feature gates with runtime check and warning.
+- **TypeScript Tooltip formatter type**: recharts `formatter` prop type mismatch for `(value: number, name: string)`. Fixed by removing explicit type annotations.
+
+### Test Results
+- 110 tests total, all passing:
+  - 32 core tests
+  - 30 server unit tests (18 storage + 6 counter_cache + 6 counter_rate)
+  - 10 agent tests
+  - 21 gRPC integration tests
+  - 17 REST integration tests
+- cargo clippy --workspace -- -D warnings: clean
+- React build succeeds (690KB JS, 207KB gzip)
+
+### Documentation Updates
+- Updated CLAUDE.md: auth, event log, HA, dashboard features, new commands, design decisions
+- Updated OVERVIEW.md: component descriptions, status to Phase 8
+- Updated REQUIREMENTS.md: API key auth (8.0), persistent event log (11.0), multi-controller HA (11.0b), REST tests, dashboard enhancements, new REST endpoints
+- Updated PROMPT_HISTORY.md: Session 9
+
+### Git Operations
+- Committed Phase 8 changes
+- Pushed to GitHub

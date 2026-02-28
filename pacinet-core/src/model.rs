@@ -212,6 +212,16 @@ pub struct CounterSnapshot {
     pub counters: Vec<RuleCounter>,
 }
 
+/// A persistent event stored in the event log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistentEvent {
+    pub id: String,
+    pub event_type: String,
+    pub source: String,
+    pub payload: String,
+    pub timestamp: DateTime<Utc>,
+}
+
 impl From<pacinet_proto::RuleCounter> for RuleCounter {
     fn from(proto: pacinet_proto::RuleCounter) -> Self {
         Self {
