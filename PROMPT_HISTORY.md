@@ -703,3 +703,94 @@ Implement Phase 8: REST API integration tests, authentication/authorization, per
 ### Git Operations
 - Committed Phase 8 changes
 - Pushed to GitHub
+
+## Session 10 — Phase 9: Audit Logging, Policy Templates, Dry-Run, Annotations, Webhook History (2026-02-28)
+
+### Prompt
+Implement Phase 9 features: Node Annotations, Audit Logging, Policy Templates, Webhook Delivery History, Dry-Run Deploy, and Dashboard Updates.
+
+### Actions Taken
+
+**Feature 1: Node Annotations**
+- Added `annotations: HashMap<String, String>` with `#[serde(default)]` to `Node` struct in model.rs
+- Added `update_annotations()` to Storage trait with default no-op
+- Implemented in MemoryStorage (get node, merge set, remove keys, store back)
+- Implemented in SqliteStorage (ALTER TABLE migration, JSON read/merge/write)
+- Added `map<string, string> annotations = 12` to NodeInfo proto
+- Added `SetNodeAnnotations` RPC and REST `PUT /api/nodes/{id}/annotations`
+- Added `pacinet node annotate <id> key=value [--remove key]` CLI command
+- Added annotations section to NodeDetail.tsx with inline edit form
+
+**Feature 2: Audit Logging**
+- Added `AuditEntry` model (id, timestamp, actor, action, resource_type, resource_id, details)
+- Added `store_audit()` and `query_audit()` to Storage trait
+- Implemented in both MemoryStorage (Vec with 10K cap) and SqliteStorage (audit_log table with indexes)
+- Added `record_audit()` fire-and-forget helper in rest.rs
+- Called after: deploy, remove_node, create/delete FSM definitions, set_annotations, create/delete templates
+- Added `GET /api/audit?action=&resource_type=&limit=` REST endpoint
+- Added `QueryAuditLog` gRPC RPC
+- Added `pacinet audit [--action] [--resource-type] [--limit]` CLI command
+- Added AuditPage.tsx with filterable table (action/resource_type dropdowns, limit selector)
+
+**Feature 3: Policy Templates**
+- Added `PolicyTemplate` model (name, description, rules_yaml, tags, timestamps)
+- Added CRUD methods to Storage trait (store/get/list/delete)
+- Implemented in both MemoryStorage and SqliteStorage (policy_templates table)
+- Added 4 gRPC RPCs: Create/Get/List/DeletePolicyTemplate
+- Added REST routes: GET/POST /api/templates, GET/DELETE /api/templates/{name}
+- Added CLI commands: template create/list/show/delete/deploy
+- Added TemplatesPage.tsx with create form, tag filter, list with delete
+
+**Feature 4: Webhook Delivery History**
+- Added `WebhookDelivery` model (id, instance_id, url, method, status_code, success, duration_ms, error, attempt, timestamp)
+- Added store/query methods to Storage trait
+- Implemented in both MemoryStorage and SqliteStorage (webhook_deliveries table with index)
+- Updated `deliver_webhook()` to accept storage and instance_id, record each attempt
+- Updated fsm_engine.rs caller to pass storage
+- Added `GET /api/webhooks/history?instance_id=&limit=` REST endpoint
+- Added `QueryWebhookDeliveries` gRPC RPC
+- Added webhook delivery table to InstanceDetail.tsx
+
+**Feature 5: Dry-Run Deploy**
+- Added `dry_run` field to DeployPolicyRequest and BatchDeployPolicyRequest protos
+- Added DryRunResult and DryRunNodeInfo proto messages
+- Added dry-run logic to deploy_policy REST handler (validates YAML, computes hash, shows diff, skips actual deploy)
+- Added dry_run_result to DeployResponse
+- Added `--dry-run` flag to CLI deploy command with preview display
+- Added DryRunPreview.tsx component showing validation status and per-node hash diff
+- Added "Preview (Dry Run)" button to DeployPage.tsx
+
+**Feature 6: Dashboard Updates**
+- Added AuditPage (`/audit`) with filterable table
+- Added TemplatesPage (`/templates`) with CRUD and tag filter
+- Added DryRunPreview component for deploy page
+- Added annotations section to NodeDetail with inline edit
+- Added webhook delivery table to InstanceDetail
+- Added navigation entries (ClipboardList icon for Audit, FileText for Templates)
+- Added routes and Header title mappings
+- Created 4 new hooks: useAudit, useTemplates, useAnnotations, useWebhooks
+- Fixed Header.tsx to accept onMenuToggle prop (mobile menu)
+
+**Files Modified/Created:**
+- pacinet-core: model.rs, storage.rs, lib.rs
+- pacinet-server: rest.rs, service.rs, webhook.rs, fsm_engine.rs
+- pacinet-server/storage: memory.rs, sqlite.rs, schema.sql
+- pacinet-proto: pacinet.proto
+- pacinet-cli: main.rs
+- pacinet-web: App.tsx, Sidebar.tsx, Header.tsx, NodeDetail.tsx, InstanceDetail.tsx, DeployPage.tsx, api.ts, useDeploy.ts
+- pacinet-web (new): AuditPage.tsx, TemplatesPage.tsx, DryRunPreview.tsx, useAudit.ts, useTemplates.ts, useAnnotations.ts, useWebhooks.ts
+- Tests: integration.rs, rest_integration.rs
+
+### Test Results
+- 115 tests total, all passing:
+  - 32 core tests
+  - 30 server unit tests
+  - 10 agent tests
+  - 21 gRPC integration tests
+  - 22 REST integration tests (5 new: annotations, audit, templates, dry-run, webhook history)
+- cargo clippy --workspace -- -D warnings: clean
+- React build succeeds
+
+### Git Operations
+- Committed Phase 9 changes
+- Pushed to GitHub

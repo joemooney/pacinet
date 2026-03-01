@@ -101,6 +101,8 @@ pub struct Node {
     pub last_heartbeat: DateTime<Utc>,
     pub pacgate_version: String,
     pub uptime_seconds: u64,
+    #[serde(default)]
+    pub annotations: HashMap<String, String>,
 }
 
 impl Node {
@@ -121,6 +123,7 @@ impl Node {
             last_heartbeat: now,
             pacgate_version,
             uptime_seconds: 0,
+            annotations: HashMap::new(),
         }
     }
 }
@@ -219,6 +222,44 @@ pub struct PersistentEvent {
     pub event_type: String,
     pub source: String,
     pub payload: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Audit log entry for tracking write operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: String,
+    pub timestamp: DateTime<Utc>,
+    pub actor: String,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub details: String,
+}
+
+/// Reusable policy YAML template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyTemplate {
+    pub name: String,
+    pub description: String,
+    pub rules_yaml: String,
+    pub tags: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Webhook delivery attempt record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookDelivery {
+    pub id: String,
+    pub instance_id: String,
+    pub url: String,
+    pub method: String,
+    pub status_code: Option<u16>,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub error: Option<String>,
+    pub attempt: u32,
     pub timestamp: DateTime<Utc>,
 }
 

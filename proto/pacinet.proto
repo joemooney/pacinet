@@ -72,6 +72,21 @@ service PaciNetManagement {
   rpc WatchFsmEvents(WatchFsmEventsRequest) returns (stream FsmEvent);
   rpc WatchCounters(WatchCountersRequest) returns (stream CounterUpdate);
   rpc WatchNodeEvents(WatchNodeEventsRequest) returns (stream NodeEvent);
+
+  // Phase 9: Node annotations
+  rpc SetNodeAnnotations(SetNodeAnnotationsRequest) returns (SetNodeAnnotationsResponse);
+
+  // Phase 9: Audit log
+  rpc QueryAuditLog(QueryAuditLogRequest) returns (QueryAuditLogResponse);
+
+  // Phase 9: Policy templates
+  rpc CreatePolicyTemplate(CreatePolicyTemplateRequest) returns (CreatePolicyTemplateResponse);
+  rpc GetPolicyTemplate(GetPolicyTemplateRequest) returns (GetPolicyTemplateResponse);
+  rpc ListPolicyTemplates(ListPolicyTemplatesRequest) returns (ListPolicyTemplatesResponse);
+  rpc DeletePolicyTemplate(DeletePolicyTemplateRequest) returns (DeletePolicyTemplateResponse);
+
+  // Phase 9: Webhook delivery history
+  rpc QueryWebhookDeliveries(QueryWebhookDeliveriesRequest) returns (QueryWebhookDeliveriesResponse);
 }
 
 // ============================================================================
@@ -101,6 +116,8 @@ message NodeInfo {
   string policy_hash = 9;
   uint64 uptime_seconds = 10;
   double last_heartbeat_age_seconds = 11;
+  // Phase 9: annotations
+  map<string, string> annotations = 12;
 }
 
 message RuleCounter {
@@ -217,12 +234,14 @@ message DeployPolicyRequest {
   string node_id = 1;
   string rules_yaml = 2;
   CompileOptions options = 3;
+  bool dry_run = 4;
 }
 
 message DeployPolicyResponse {
   bool success = 1;
   string message = 2;
   repeated string warnings = 3;
+  DryRunResult dry_run_result = 4;
 }
 
 message GetPolicyRequest {
@@ -268,6 +287,7 @@ message BatchDeployPolicyRequest {
   map<string, string> label_filter = 1;
   string rules_yaml = 2;
   CompileOptions options = 3;
+  bool dry_run = 4;
 }
 
 message BatchDeployPolicyResponse {
@@ -559,4 +579,144 @@ message NodeEvent {
   NodeState old_state = 5;
   NodeState new_state = 6;
   google.protobuf.Timestamp timestamp = 7;
+}
+
+// ============================================================================
+// Phase 9: Node annotations
+// ============================================================================
+
+message SetNodeAnnotationsRequest {
+  string node_id = 1;
+  map<string, string> annotations = 2;
+  repeated string remove_keys = 3;
+}
+
+message SetNodeAnnotationsResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// Phase 9: Audit log
+// ============================================================================
+
+message QueryAuditLogRequest {
+  string action = 1;
+  string resource_type = 2;
+  string resource_id = 3;
+  google.protobuf.Timestamp since = 4;
+  uint32 limit = 5;
+}
+
+message QueryAuditLogResponse {
+  repeated AuditEntryInfo entries = 1;
+}
+
+message AuditEntryInfo {
+  string id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string actor = 3;
+  string action = 4;
+  string resource_type = 5;
+  string resource_id = 6;
+  string details = 7;
+}
+
+// ============================================================================
+// Phase 9: Policy templates
+// ============================================================================
+
+message CreatePolicyTemplateRequest {
+  string name = 1;
+  string description = 2;
+  string rules_yaml = 3;
+  repeated string tags = 4;
+}
+
+message CreatePolicyTemplateResponse {
+  bool success = 1;
+  string name = 2;
+  string message = 3;
+}
+
+message GetPolicyTemplateRequest {
+  string name = 1;
+}
+
+message GetPolicyTemplateResponse {
+  string name = 1;
+  string description = 2;
+  string rules_yaml = 3;
+  repeated string tags = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message ListPolicyTemplatesRequest {
+  string tag = 1;
+}
+
+message ListPolicyTemplatesResponse {
+  repeated PolicyTemplateSummary templates = 1;
+}
+
+message PolicyTemplateSummary {
+  string name = 1;
+  string description = 2;
+  repeated string tags = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+message DeletePolicyTemplateRequest {
+  string name = 1;
+}
+
+message DeletePolicyTemplateResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// Phase 9: Webhook delivery history
+// ============================================================================
+
+message QueryWebhookDeliveriesRequest {
+  string instance_id = 1;
+  uint32 limit = 2;
+}
+
+message QueryWebhookDeliveriesResponse {
+  repeated WebhookDeliveryInfo deliveries = 1;
+}
+
+message WebhookDeliveryInfo {
+  string id = 1;
+  string instance_id = 2;
+  string url = 3;
+  string method = 4;
+  uint32 status_code = 5;
+  bool success = 6;
+  uint64 duration_ms = 7;
+  string error = 8;
+  uint32 attempt = 9;
+  google.protobuf.Timestamp timestamp = 10;
+}
+
+// ============================================================================
+// Phase 9: Dry-run deploy
+// ============================================================================
+
+message DryRunResult {
+  bool valid = 1;
+  repeated string validation_errors = 2;
+  repeated DryRunNodeInfo target_nodes = 3;
+}
+
+message DryRunNodeInfo {
+  string node_id = 1;
+  string hostname = 2;
+  string current_policy_hash = 3;
+  string new_policy_hash = 4;
+  bool policy_changed = 5;
 }

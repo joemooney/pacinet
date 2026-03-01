@@ -472,3 +472,82 @@
 - `make run-server-web` — server with built SPA on :8081
 - `make run-server-auth` — server with API key auth enabled
 - Production: build React, serve from `--static-dir`
+
+## 13. Node Annotations
+
+### 13.1 Model
+- Nodes support key-value annotations (HashMap<String, String>) for operator notes
+- Annotations persist across heartbeats and restarts (SQLite)
+- Annotations displayed in node detail views (CLI, REST, dashboard)
+
+### 13.2 Operations
+- SET: merge new annotations into existing set
+- REMOVE: remove specified keys from annotations
+- REST: `PUT /api/nodes/{id}/annotations` with `{ annotations: {k:v}, remove_keys: [k] }`
+- gRPC: `SetNodeAnnotations` RPC
+- CLI: `pacinet node annotate <id> key=value [--remove key]`
+- Dashboard: inline edit form on NodeDetail panel
+
+## 14. Audit Logging
+
+### 14.1 Model
+- AuditEntry: id (UUID), timestamp, actor, action, resource_type, resource_id, details (JSON)
+- Actors: "api", "cli", "fsm_engine", "system"
+- Actions: deploy, remove_node, set_annotations, create/delete_fsm_definition, start/advance/cancel_fsm, create/delete_template, rollback_policy
+
+### 14.2 Storage
+- MemoryStorage: Vec<AuditEntry> with 10K cap
+- SqliteStorage: audit_log table with indexes on timestamp (DESC) and action
+- Fire-and-forget recording via spawn_blocking
+
+### 14.3 Query
+- Filterable by action, resource_type, resource_id, since, limit
+- REST: `GET /api/audit?action=deploy&resource_type=node&since=<iso>&limit=50`
+- gRPC: `QueryAuditLog` RPC
+- CLI: `pacinet audit [--action] [--resource-type] [--limit]`
+- Dashboard: AuditPage with filter dropdowns
+
+## 15. Policy Templates
+
+### 15.1 Model
+- PolicyTemplate: name (PK), description, rules_yaml, tags (Vec<String>), created_at, updated_at
+- Templates are named, reusable policy YAML definitions
+
+### 15.2 CRUD
+- REST: GET/POST /api/templates, GET/DELETE /api/templates/{name}
+- gRPC: Create/Get/List/DeletePolicyTemplate RPCs
+- CLI: template create/list/show/delete/deploy
+- List supports tag filtering
+
+### 15.3 Template Deploy
+- CLI: `pacinet template deploy <name> --node <id> [--counters] [--dry-run]`
+- Fetches template YAML, then calls DeployPolicy
+- Dashboard: Templates page with create form and list
+
+## 16. Webhook Delivery History
+
+### 16.1 Model
+- WebhookDelivery: id, instance_id, url, method, status_code, success, duration_ms, error, attempt, timestamp
+- Tracks each delivery attempt (including retries)
+
+### 16.2 Recording
+- deliver_webhook() records each attempt (success or failure) via spawn_blocking
+- Linked to FSM instance_id for querying
+
+### 16.3 Query
+- REST: `GET /api/webhooks/history?instance_id=<id>&limit=50`
+- gRPC: `QueryWebhookDeliveries` RPC
+- Dashboard: webhook delivery table in InstanceDetail panel
+
+## 17. Dry-Run Deploy
+
+### 17.1 Behavior
+- When dry_run=true, deploy validates YAML, computes new hash, fetches target node state
+- Returns DryRunResult with: valid, validation_errors, target_nodes (each with current/new hash, changed flag)
+- Skips: actual policy storage, agent forwarding, state changes, audit recording
+
+### 17.2 Interfaces
+- REST: POST /api/deploy with `dry_run: true` in body
+- gRPC: `dry_run` field in DeployPolicyRequest/BatchDeployPolicyRequest
+- CLI: `pacinet deploy <file> --node <id> --dry-run`
+- Dashboard: "Preview (Dry Run)" button on Deploy page, DryRunPreview component

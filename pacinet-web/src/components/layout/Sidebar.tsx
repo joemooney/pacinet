@@ -6,6 +6,9 @@ import {
   BarChart3,
   GitBranch,
   Radio,
+  ClipboardList,
+  FileText,
+  X,
 } from 'lucide-react';
 
 const navItems = [
@@ -15,24 +18,53 @@ const navItems = [
   { to: '/counters', icon: BarChart3, label: 'Counters' },
   { to: '/fsm', icon: GitBranch, label: 'FSM' },
   { to: '/watch', icon: Radio, label: 'Watch' },
+  { to: '/audit', icon: ClipboardList, label: 'Audit' },
+  { to: '/templates', icon: FileText, label: 'Templates' },
 ];
 
-export default function Sidebar() {
+interface SidebarProps {
+  open: boolean;
+  onClose: () => void;
+}
+
+export default function Sidebar({ open, onClose }: SidebarProps) {
   return (
-    <aside className="w-56 bg-surface-alt border-r border-edge flex flex-col">
-      <div className="h-14 flex items-center px-4 border-b border-edge">
-        <span className="text-lg font-semibold text-accent">PaciNet</span>
+    <>
+      <div
+        className={`fixed inset-0 z-30 bg-black/45 backdrop-blur-[1px] transition-opacity md:hidden ${
+          open ? 'opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+        onClick={onClose}
+      />
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 w-72 bg-surface-alt/95 backdrop-blur-md border-r border-edge flex flex-col transition-transform md:static md:translate-x-0 md:w-64 ${
+          open ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+      <div className="h-16 flex items-center justify-between px-5 border-b border-edge">
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-content-muted">Control Plane</div>
+          <span className="text-xl font-semibold text-content">PaciNet</span>
+        </div>
+        <button
+          className="md:hidden rounded-lg p-2 text-content-secondary hover:text-content hover:bg-surface-hover"
+          onClick={onClose}
+          aria-label="Close menu"
+        >
+          <X size={16} />
+        </button>
       </div>
-      <nav className="flex-1 py-2">
+      <nav className="flex-1 py-3">
         {navItems.map(({ to, icon: Icon, label }) => (
           <NavLink
             key={to}
             to={to}
             end={to === '/'}
+            onClick={onClose}
             className={({ isActive }) =>
-              `flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+              `mx-2 flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm transition-colors ${
                 isActive
-                  ? 'text-accent bg-accent/10 border-r-2 border-accent'
+                  ? 'text-content bg-accent/20 ring-1 ring-accent/30'
                   : 'text-content-secondary hover:text-content hover:bg-surface-hover'
               }`
             }
@@ -42,9 +74,11 @@ export default function Sidebar() {
           </NavLink>
         ))}
       </nav>
-      <div className="px-4 py-3 border-t border-edge text-xs text-content-muted">
-        PaciNet SDN Controller
+      <div className="m-3 rounded-xl border border-edge bg-surface px-4 py-3">
+        <div className="text-[11px] uppercase tracking-[0.12em] text-content-muted">System</div>
+        <div className="mt-1 text-sm text-content-secondary">Fleet controller active</div>
       </div>
     </aside>
+    </>
   );
 }

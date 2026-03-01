@@ -56,6 +56,7 @@ pub struct NodeJson {
     pub uptime_seconds: u64,
     pub policy_hash: String,
     pub last_heartbeat_age_seconds: f64,
+    pub annotations: HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -195,6 +196,68 @@ pub struct DeployResponse {
     pub success: bool,
     pub message: String,
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run_result: Option<DryRunResultJson>,
+}
+
+#[derive(Serialize)]
+pub struct DryRunResultJson {
+    pub valid: bool,
+    pub validation_errors: Vec<String>,
+    pub target_nodes: Vec<DryRunNodeJson>,
+}
+
+#[derive(Serialize)]
+pub struct DryRunNodeJson {
+    pub node_id: String,
+    pub hostname: String,
+    pub current_policy_hash: String,
+    pub new_policy_hash: String,
+    pub policy_changed: bool,
+}
+
+#[derive(Serialize)]
+pub struct AuditEntryJson {
+    pub id: String,
+    pub timestamp: String,
+    pub actor: String,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub details: serde_json::Value,
+}
+
+#[derive(Serialize)]
+pub struct PolicyTemplateJson {
+    pub name: String,
+    pub description: String,
+    pub rules_yaml: String,
+    pub tags: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Serialize)]
+pub struct PolicyTemplateSummaryJson {
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Serialize)]
+pub struct WebhookDeliveryJson {
+    pub id: String,
+    pub instance_id: String,
+    pub url: String,
+    pub method: String,
+    pub status_code: Option<u16>,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub error: Option<String>,
+    pub attempt: u32,
+    pub timestamp: String,
 }
 
 #[derive(Serialize)]
@@ -239,6 +302,8 @@ pub struct DeployRequest {
     pub rate_limit: bool,
     #[serde(default)]
     pub conntrack: bool,
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Deserialize)]
@@ -251,6 +316,58 @@ pub struct BatchDeployRequest {
     pub rate_limit: bool,
     #[serde(default)]
     pub conntrack: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Deserialize)]
+pub struct SetAnnotationsRequest {
+    #[serde(default)]
+    pub annotations: HashMap<String, String>,
+    #[serde(default)]
+    pub remove_keys: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateTemplateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub rules_yaml: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TemplateQuery {
+    #[serde(default)]
+    pub tag: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub resource_type: Option<String>,
+    #[serde(default)]
+    pub resource_id: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default = "default_audit_limit")]
+    pub limit: u32,
+}
+
+fn default_audit_limit() -> u32 {
+    50
+}
+
+#[derive(Deserialize)]
+pub struct WebhookQuery {
+    #[serde(default)]
+    pub instance_id: Option<String>,
+    #[serde(default = "default_audit_limit")]
+    pub limit: u32,
 }
 
 #[derive(Deserialize)]
@@ -521,6 +638,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/nodes/{id}/policy/history", get(get_policy_history))
         .route("/api/nodes/{id}/deploy/history", get(get_deployment_history))
         .route("/api/nodes/{id}/policy/rollback", post(rollback_policy))
+        .route(
+            "/api/nodes/{id}/annotations",
+            axum::routing::put(set_annotations),
+        )
         // Fleet
         .route("/api/fleet", get(get_fleet_status))
         // Counters
@@ -551,6 +672,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/fsm", get(sse_fsm_events))
         // Event history
         .route("/api/events/history", get(get_event_history))
+        // Phase 9: Audit
+        .route("/api/audit", get(get_audit_log))
+        // Phase 9: Templates
+        .route(
+            "/api/templates",
+            get(list_templates).post(create_template),
+        )
+        .route(
+            "/api/templates/{name}",
+            get(get_template).delete(delete_template),
+        )
+        // Phase 9: Webhook history
+        .route("/api/webhooks/history", get(get_webhook_history))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -593,6 +727,7 @@ async fn list_nodes(
                 uptime_seconds: n.uptime_seconds,
                 policy_hash: policy.map(|p| p.policy_hash.clone()).unwrap_or_default(),
                 last_heartbeat_age_seconds: heartbeat_age,
+                annotations: n.annotations.clone(),
             }
         })
         .collect();
@@ -618,7 +753,7 @@ async fn get_node(
         node_id: node.node_id,
         hostname: node.hostname,
         agent_address: node.agent_address,
-        labels: node.labels,
+        labels: node.labels.clone(),
         state: node.state.to_string(),
         registered_at: node.registered_at.to_rfc3339(),
         last_heartbeat: node.last_heartbeat.to_rfc3339(),
@@ -626,6 +761,7 @@ async fn get_node(
         uptime_seconds: node.uptime_seconds,
         policy_hash: policy.map(|p| p.policy_hash).unwrap_or_default(),
         last_heartbeat_age_seconds: heartbeat_age,
+        annotations: node.annotations,
     }))
 }
 
@@ -654,6 +790,14 @@ async fn remove_node(
                 timestamp: chrono::Utc::now(),
             });
         }
+        record_audit(
+            &state.storage,
+            "api",
+            "remove_node",
+            "node",
+            &id,
+            serde_json::json!({}),
+        );
     }
 
     Ok(Json(SuccessResponse {
@@ -944,6 +1088,37 @@ async fn deploy_policy(
             )
         })?;
 
+    // Dry-run mode: validate YAML, compute hash, show diff — no actual deploy
+    if body.dry_run {
+        let mut validation_errors = Vec::new();
+        if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(&body.rules_yaml) {
+            validation_errors.push(format!("YAML parse error: {}", e));
+        }
+        let new_hash = pacinet_core::policy_hash(&body.rules_yaml);
+        let nid = body.node_id.clone();
+        let current_policy = blocking(&state.storage, move |s| s.get_policy(&nid)).await?;
+        let current_hash = current_policy
+            .map(|p| p.policy_hash)
+            .unwrap_or_default();
+
+        return Ok(Json(DeployResponse {
+            success: true,
+            message: "Dry-run complete".to_string(),
+            warnings: vec![],
+            dry_run_result: Some(DryRunResultJson {
+                valid: validation_errors.is_empty(),
+                validation_errors,
+                target_nodes: vec![DryRunNodeJson {
+                    node_id: node.node_id,
+                    hostname: node.hostname,
+                    current_policy_hash: current_hash.clone(),
+                    new_policy_hash: new_hash.clone(),
+                    policy_changed: current_hash != new_hash,
+                }],
+            }),
+        }));
+    }
+
     let options = pacinet_proto::CompileOptions {
         counters: body.counters,
         rate_limit: body.rate_limit,
@@ -967,10 +1142,20 @@ async fn deploy_policy(
     // Release deploy guard
     state.storage.end_deploy(&body.node_id);
 
+    record_audit(
+        &state.storage,
+        "api",
+        "deploy",
+        "node",
+        &body.node_id,
+        serde_json::json!({"success": outcome.success}),
+    );
+
     Ok(Json(DeployResponse {
         success: outcome.success,
         message: outcome.message,
         warnings: outcome.warnings,
+        dry_run_result: None,
     }))
 }
 
@@ -1105,6 +1290,15 @@ async fn create_fsm_definition(
     let name = def.name.clone();
 
     blocking(&state.storage, move |s| s.store_fsm_definition(def)).await?;
+
+    record_audit(
+        &state.storage,
+        "api",
+        "create_fsm_definition",
+        "fsm_definition",
+        &name,
+        serde_json::json!({}),
+    );
 
     Ok(Json(CreateFsmDefResponse {
         success: true,
@@ -1267,6 +1461,255 @@ async fn cancel_fsm(
             message: e.to_string(),
         })),
     }
+}
+
+// ============================================================================
+// Audit helper — fire-and-forget
+// ============================================================================
+
+fn record_audit(
+    storage: &Arc<dyn Storage>,
+    actor: &str,
+    action: &str,
+    resource_type: &str,
+    resource_id: &str,
+    details: serde_json::Value,
+) {
+    let entry = pacinet_core::AuditEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: chrono::Utc::now(),
+        actor: actor.to_string(),
+        action: action.to_string(),
+        resource_type: resource_type.to_string(),
+        resource_id: resource_id.to_string(),
+        details: details.to_string(),
+    };
+    let s = storage.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = s.store_audit(entry);
+    });
+}
+
+// ============================================================================
+// Phase 9: Annotations handler
+// ============================================================================
+
+async fn set_annotations(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SetAnnotationsRequest>,
+) -> Result<Json<SuccessResponse>, AppError> {
+    require_leader(&state.config)?;
+    let node_id = id.clone();
+    let set = body.annotations.clone();
+    let remove: Vec<String> = body.remove_keys.clone();
+    blocking(&state.storage, move |s| {
+        s.update_annotations(&node_id, set, &remove)
+    })
+    .await?;
+
+    record_audit(
+        &state.storage,
+        "api",
+        "set_annotations",
+        "node",
+        &id,
+        serde_json::json!({"set": body.annotations, "remove": body.remove_keys}),
+    );
+
+    Ok(Json(SuccessResponse {
+        success: true,
+        message: "Annotations updated".to_string(),
+    }))
+}
+
+// ============================================================================
+// Phase 9: Audit log handler
+// ============================================================================
+
+async fn get_audit_log(
+    State(state): State<AppState>,
+    Query(q): Query<AuditQuery>,
+) -> Result<Json<Vec<AuditEntryJson>>, AppError> {
+    let since = q.since.as_deref().and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    });
+    let action = q.action.clone();
+    let resource_type = q.resource_type.clone();
+    let resource_id = q.resource_id.clone();
+    let limit = q.limit;
+
+    let entries = blocking(&state.storage, move |s| {
+        s.query_audit(
+            action.as_deref(),
+            resource_type.as_deref(),
+            resource_id.as_deref(),
+            since,
+            limit,
+        )
+    })
+    .await?;
+
+    let result: Vec<AuditEntryJson> = entries
+        .into_iter()
+        .map(|e| AuditEntryJson {
+            id: e.id,
+            timestamp: e.timestamp.to_rfc3339(),
+            actor: e.actor,
+            action: e.action,
+            resource_type: e.resource_type,
+            resource_id: e.resource_id,
+            details: serde_json::from_str(&e.details).unwrap_or(serde_json::Value::Null),
+        })
+        .collect();
+
+    Ok(Json(result))
+}
+
+// ============================================================================
+// Phase 9: Template handlers
+// ============================================================================
+
+async fn list_templates(
+    State(state): State<AppState>,
+    Query(q): Query<TemplateQuery>,
+) -> Result<Json<Vec<PolicyTemplateSummaryJson>>, AppError> {
+    let tag = q.tag.clone();
+    let templates = blocking(&state.storage, move |s| s.list_templates(tag.as_deref())).await?;
+
+    let result: Vec<PolicyTemplateSummaryJson> = templates
+        .into_iter()
+        .map(|t| PolicyTemplateSummaryJson {
+            name: t.name,
+            description: t.description,
+            tags: t.tags,
+            created_at: t.created_at.to_rfc3339(),
+            updated_at: t.updated_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(result))
+}
+
+async fn get_template(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<PolicyTemplateJson>, AppError> {
+    let tpl_name = name.clone();
+    let template = blocking(&state.storage, move |s| s.get_template(&tpl_name))
+        .await?
+        .ok_or_else(|| {
+            AppError(
+                StatusCode::NOT_FOUND,
+                format!("Template '{}' not found", name),
+            )
+        })?;
+
+    Ok(Json(PolicyTemplateJson {
+        name: template.name,
+        description: template.description,
+        rules_yaml: template.rules_yaml,
+        tags: template.tags,
+        created_at: template.created_at.to_rfc3339(),
+        updated_at: template.updated_at.to_rfc3339(),
+    }))
+}
+
+async fn create_template(
+    State(state): State<AppState>,
+    Json(body): Json<CreateTemplateRequest>,
+) -> Result<Json<SuccessResponse>, AppError> {
+    require_leader(&state.config)?;
+    let now = chrono::Utc::now();
+    let template = pacinet_core::PolicyTemplate {
+        name: body.name.clone(),
+        description: body.description,
+        rules_yaml: body.rules_yaml,
+        tags: body.tags,
+        created_at: now,
+        updated_at: now,
+    };
+
+    blocking(&state.storage, move |s| s.store_template(template)).await?;
+
+    record_audit(
+        &state.storage,
+        "api",
+        "create_template",
+        "template",
+        &body.name,
+        serde_json::json!({}),
+    );
+
+    Ok(Json(SuccessResponse {
+        success: true,
+        message: format!("Template '{}' created", body.name),
+    }))
+}
+
+async fn delete_template(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<SuccessResponse>, AppError> {
+    require_leader(&state.config)?;
+    let tpl_name = name.clone();
+    let deleted = blocking(&state.storage, move |s| s.delete_template(&tpl_name)).await?;
+
+    if deleted {
+        record_audit(
+            &state.storage,
+            "api",
+            "delete_template",
+            "template",
+            &name,
+            serde_json::json!({}),
+        );
+    }
+
+    Ok(Json(SuccessResponse {
+        success: deleted,
+        message: if deleted {
+            format!("Template '{}' deleted", name)
+        } else {
+            format!("Template '{}' not found", name)
+        },
+    }))
+}
+
+// ============================================================================
+// Phase 9: Webhook history handler
+// ============================================================================
+
+async fn get_webhook_history(
+    State(state): State<AppState>,
+    Query(q): Query<WebhookQuery>,
+) -> Result<Json<Vec<WebhookDeliveryJson>>, AppError> {
+    let instance_id = q.instance_id.clone();
+    let limit = q.limit;
+    let deliveries = blocking(&state.storage, move |s| {
+        s.query_webhook_deliveries(instance_id.as_deref(), limit)
+    })
+    .await?;
+
+    let result: Vec<WebhookDeliveryJson> = deliveries
+        .into_iter()
+        .map(|d| WebhookDeliveryJson {
+            id: d.id,
+            instance_id: d.instance_id,
+            url: d.url,
+            method: d.method,
+            status_code: d.status_code,
+            success: d.success,
+            duration_ms: d.duration_ms,
+            error: d.error,
+            attempt: d.attempt,
+            timestamp: d.timestamp.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(result))
 }
 
 // ============================================================================

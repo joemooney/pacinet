@@ -712,3 +712,270 @@ async fn test_rest_aggregate_counters_empty() {
     let counters: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(counters.len(), 0);
 }
+
+// ============================================================================
+// Phase 9: Node Annotations
+// ============================================================================
+
+#[tokio::test]
+async fn test_rest_node_annotations() {
+    let storage = Arc::new(MemoryStorage::new());
+    let (grpc_port, rest_port, _) = start_rest_server(storage, None).await;
+    let node_id = register_node_grpc(grpc_port, "ann-node", HashMap::new()).await;
+
+    let client = reqwest::Client::new();
+
+    // Set annotations
+    let resp = client
+        .put(format!("{}/api/nodes/{}/annotations", base_url(rest_port), node_id))
+        .json(&serde_json::json!({
+            "annotations": {"env": "prod", "ticket": "JIRA-123"},
+            "remove_keys": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["success"].as_bool().unwrap());
+
+    // Verify annotations in node detail
+    let resp = client
+        .get(format!("{}/api/nodes/{}", base_url(rest_port), node_id))
+        .send()
+        .await
+        .unwrap();
+    let node: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(node["annotations"]["env"], "prod");
+    assert_eq!(node["annotations"]["ticket"], "JIRA-123");
+
+    // Remove an annotation
+    let resp = client
+        .put(format!("{}/api/nodes/{}/annotations", base_url(rest_port), node_id))
+        .json(&serde_json::json!({
+            "annotations": {},
+            "remove_keys": ["ticket"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .get(format!("{}/api/nodes/{}", base_url(rest_port), node_id))
+        .send()
+        .await
+        .unwrap();
+    let node: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(node["annotations"]["env"], "prod");
+    assert!(node["annotations"].get("ticket").is_none());
+}
+
+// ============================================================================
+// Phase 9: Audit Log
+// ============================================================================
+
+#[tokio::test]
+async fn test_rest_audit_log() {
+    let storage = Arc::new(MemoryStorage::new());
+    let (grpc_port, rest_port, _) = start_rest_server(storage, None).await;
+    let node_id = register_node_grpc(grpc_port, "audit-node", HashMap::new()).await;
+
+    let client = reqwest::Client::new();
+
+    // Deploy to create an audit entry
+    let _resp = client
+        .post(format!("{}/api/deploy", base_url(rest_port)))
+        .json(&serde_json::json!({
+            "node_id": node_id,
+            "rules_yaml": "rules:\n  - name: test\n    action: allow",
+            "counters": false,
+            "rate_limit": false,
+            "conntrack": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Brief pause for async audit recording
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Query audit log
+    let resp = client
+        .get(format!("{}/api/audit?limit=10", base_url(rest_port)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let entries: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert!(!entries.is_empty(), "Should have at least one audit entry");
+    assert_eq!(entries[0]["action"], "deploy");
+    assert_eq!(entries[0]["resource_type"], "node");
+
+    // Filter by action
+    let resp = client
+        .get(format!("{}/api/audit?action=deploy&limit=10", base_url(rest_port)))
+        .send()
+        .await
+        .unwrap();
+    let entries: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|e| e["action"] == "deploy"));
+}
+
+// ============================================================================
+// Phase 9: Policy Templates
+// ============================================================================
+
+#[tokio::test]
+async fn test_rest_templates_crud() {
+    let storage = Arc::new(MemoryStorage::new());
+    let (_, rest_port, _) = start_rest_server(storage, None).await;
+
+    let client = reqwest::Client::new();
+
+    // Create template
+    let resp = client
+        .post(format!("{}/api/templates", base_url(rest_port)))
+        .json(&serde_json::json!({
+            "name": "base-firewall",
+            "description": "Base firewall rules",
+            "rules_yaml": "rules:\n  - name: drop_ssh\n    action: drop",
+            "tags": ["firewall", "production"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["success"].as_bool().unwrap());
+    assert!(body["message"].as_str().unwrap().contains("base-firewall"));
+
+    // List templates
+    let resp = client
+        .get(format!("{}/api/templates", base_url(rest_port)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let templates: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0]["name"], "base-firewall");
+
+    // Get single template
+    let resp = client
+        .get(format!("{}/api/templates/base-firewall", base_url(rest_port)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let tmpl: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(tmpl["name"], "base-firewall");
+    assert!(tmpl["rules_yaml"].as_str().unwrap().contains("drop_ssh"));
+    assert_eq!(tmpl["tags"][0], "firewall");
+
+    // Filter by tag
+    let resp = client
+        .get(format!("{}/api/templates?tag=production", base_url(rest_port)))
+        .send()
+        .await
+        .unwrap();
+    let templates: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(templates.len(), 1);
+
+    let resp = client
+        .get(format!("{}/api/templates?tag=nonexistent", base_url(rest_port)))
+        .send()
+        .await
+        .unwrap();
+    let templates: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(templates.len(), 0);
+
+    // Delete template
+    let resp = client
+        .delete(format!("{}/api/templates/base-firewall", base_url(rest_port)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["success"].as_bool().unwrap());
+
+    // Verify deleted
+    let resp = client
+        .get(format!("{}/api/templates", base_url(rest_port)))
+        .send()
+        .await
+        .unwrap();
+    let templates: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(templates.len(), 0);
+}
+
+// ============================================================================
+// Phase 9: Dry-Run Deploy
+// ============================================================================
+
+#[tokio::test]
+async fn test_rest_dry_run_deploy() {
+    let storage = Arc::new(MemoryStorage::new());
+    let (grpc_port, rest_port, _) = start_rest_server(storage, None).await;
+    let node_id = register_node_grpc(grpc_port, "dryrun-node", HashMap::new()).await;
+
+    let client = reqwest::Client::new();
+
+    // Dry-run deploy
+    let resp = client
+        .post(format!("{}/api/deploy", base_url(rest_port)))
+        .json(&serde_json::json!({
+            "node_id": node_id,
+            "rules_yaml": "rules:\n  - name: test\n    action: allow",
+            "counters": false,
+            "rate_limit": false,
+            "conntrack": false,
+            "dry_run": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    // Dry-run should return success=true with dry_run_result
+    assert!(body["success"].as_bool().unwrap());
+    assert!(body["dry_run_result"].is_object());
+    let dr = &body["dry_run_result"];
+    assert!(dr["valid"].as_bool().unwrap());
+    assert_eq!(dr["target_nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(dr["target_nodes"][0]["node_id"], node_id);
+    assert!(dr["target_nodes"][0]["policy_changed"].as_bool().unwrap());
+
+    // Verify no actual deploy happened (node should still be in registered state)
+    let resp = client
+        .get(format!("{}/api/nodes/{}", base_url(rest_port), node_id))
+        .send()
+        .await
+        .unwrap();
+    let node: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(node["state"], "registered");
+    assert_eq!(node["policy_hash"], "");
+}
+
+// ============================================================================
+// Phase 9: Webhook Delivery History (empty query)
+// ============================================================================
+
+#[tokio::test]
+async fn test_rest_webhook_history_empty() {
+    let storage = Arc::new(MemoryStorage::new());
+    let (_, rest_port, _) = start_rest_server(storage, None).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/webhooks/history?limit=10", base_url(rest_port)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let deliveries: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(deliveries.len(), 0);
+}

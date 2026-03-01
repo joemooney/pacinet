@@ -8,6 +8,8 @@ import DeployPage from './components/deploy/DeployPage';
 import CountersPage from './components/counters/CountersPage';
 import FsmPage from './components/fsm/FsmPage';
 import WatchPage from './components/watch/WatchPage';
+import AuditPage from './components/audit/AuditPage';
+import TemplatesPage from './components/templates/TemplatesPage';
 import ApiKeyPrompt from './components/auth/ApiKeyPrompt';
 
 export default function App() {
@@ -44,6 +46,8 @@ export default function App() {
           <Route path="/counters" element={<CountersPage />} />
           <Route path="/fsm" element={<FsmPage />} />
           <Route path="/watch" element={<WatchPage />} />
+          <Route path="/audit" element={<AuditPage />} />
+          <Route path="/templates" element={<TemplatesPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

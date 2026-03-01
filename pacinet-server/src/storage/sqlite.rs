@@ -36,9 +36,11 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let labels_json = serde_json::to_string(&node.labels)
             .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        let annotations_json = serde_json::to_string(&node.annotations)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
         conn.execute(
-            "INSERT INTO nodes (node_id, hostname, agent_address, labels, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO nodes (node_id, hostname, agent_address, labels, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds, annotations)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 &node.node_id,
                 &node.hostname,
@@ -49,6 +51,7 @@ impl Storage for SqliteStorage {
                 node.last_heartbeat.to_rfc3339(),
                 &node.pacgate_version,
                 node.uptime_seconds as i64,
+                &annotations_json,
             ],
         )
         .map_err(|e| PaciNetError::Internal(format!("Failed to insert node: {}", e)))?;
@@ -59,7 +62,7 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT node_id, hostname, agent_address, labels, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds
+                "SELECT node_id, hostname, agent_address, labels, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds, annotations
                  FROM nodes WHERE node_id = ?1",
             )
             .map_err(|e| PaciNetError::Internal(e.to_string()))?;
@@ -83,7 +86,7 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT node_id, hostname, agent_address, labels, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds
+                "SELECT node_id, hostname, agent_address, labels, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds, annotations
                  FROM nodes",
             )
             .map_err(|e| PaciNetError::Internal(e.to_string()))?;
@@ -881,6 +884,335 @@ impl Storage for SqliteStorage {
             }
         }
     }
+
+    // ---- Node annotations ----
+
+    fn update_annotations(
+        &self,
+        node_id: &str,
+        set: HashMap<String, String>,
+        remove: &[String],
+    ) -> Result<(), PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let annotations_json: String = conn
+            .query_row(
+                "SELECT annotations FROM nodes WHERE node_id = ?1",
+                rusqlite::params![node_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+            .ok_or_else(|| PaciNetError::NodeNotFound(node_id.to_string()))?;
+
+        let mut annotations: HashMap<String, String> =
+            serde_json::from_str(&annotations_json).unwrap_or_default();
+        for key in remove {
+            annotations.remove(key);
+        }
+        annotations.extend(set);
+
+        let new_json = serde_json::to_string(&annotations)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        conn.execute(
+            "UPDATE nodes SET annotations = ?1 WHERE node_id = ?2",
+            rusqlite::params![new_json, node_id],
+        )
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    // ---- Audit log ----
+
+    fn store_audit(&self, entry: AuditEntry) -> Result<(), PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO audit_log (id, timestamp, actor, action, resource_type, resource_id, details) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                &entry.id,
+                entry.timestamp.to_rfc3339(),
+                &entry.actor,
+                &entry.action,
+                &entry.resource_type,
+                &entry.resource_id,
+                &entry.details,
+            ],
+        )
+        .map_err(|e| PaciNetError::Internal(format!("Failed to store audit entry: {}", e)))?;
+        Ok(())
+    }
+
+    fn query_audit(
+        &self,
+        action: Option<&str>,
+        resource_type: Option<&str>,
+        resource_id: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        limit: u32,
+    ) -> Result<Vec<AuditEntry>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let mut conditions = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+
+        if let Some(a) = action {
+            conditions.push(format!("action = ?{}", idx));
+            params.push(Box::new(a.to_string()));
+            idx += 1;
+        }
+        if let Some(rt) = resource_type {
+            conditions.push(format!("resource_type = ?{}", idx));
+            params.push(Box::new(rt.to_string()));
+            idx += 1;
+        }
+        if let Some(ri) = resource_id {
+            conditions.push(format!("resource_id = ?{}", idx));
+            params.push(Box::new(ri.to_string()));
+            idx += 1;
+        }
+        if let Some(s) = since {
+            conditions.push(format!("timestamp >= ?{}", idx));
+            params.push(Box::new(s.to_rfc3339()));
+            idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT id, timestamp, actor, action, resource_type, resource_id, details FROM audit_log {} ORDER BY timestamp DESC LIMIT ?{}",
+            where_clause, idx
+        );
+        params.push(Box::new(limit as i64));
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let entries: Vec<AuditEntry> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let id: String = row.get(0)?;
+                let ts_str: String = row.get(1)?;
+                let actor: String = row.get(2)?;
+                let action: String = row.get(3)?;
+                let resource_type: String = row.get(4)?;
+                let resource_id: String = row.get(5)?;
+                let details: String = row.get(6)?;
+                Ok((id, ts_str, actor, action, resource_type, resource_id, details))
+            })
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, ts_str, actor, action, resource_type, resource_id, details)| {
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                    .ok()?
+                    .with_timezone(&Utc);
+                Some(AuditEntry {
+                    id,
+                    timestamp,
+                    actor,
+                    action,
+                    resource_type,
+                    resource_id,
+                    details,
+                })
+            })
+            .collect();
+
+        Ok(entries)
+    }
+
+    // ---- Policy templates ----
+
+    fn store_template(&self, template: PolicyTemplate) -> Result<(), PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let tags_json = serde_json::to_string(&template.tags)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO policy_templates (name, description, rules_yaml, tags, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                &template.name,
+                &template.description,
+                &template.rules_yaml,
+                &tags_json,
+                template.created_at.to_rfc3339(),
+                template.updated_at.to_rfc3339(),
+            ],
+        )
+        .map_err(|e| PaciNetError::Internal(format!("Failed to store template: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_template(&self, name: &str) -> Result<Option<PolicyTemplate>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .query_row(
+                "SELECT name, description, rules_yaml, tags, created_at, updated_at FROM policy_templates WHERE name = ?1",
+                rusqlite::params![name],
+                |row| {
+                    let name: String = row.get(0)?;
+                    let description: String = row.get(1)?;
+                    let rules_yaml: String = row.get(2)?;
+                    let tags_json: String = row.get(3)?;
+                    let created_at_str: String = row.get(4)?;
+                    let updated_at_str: String = row.get(5)?;
+                    Ok((name, description, rules_yaml, tags_json, created_at_str, updated_at_str))
+                },
+            )
+            .optional()
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        match result {
+            None => Ok(None),
+            Some((name, description, rules_yaml, tags_json, created_at_str, updated_at_str)) => {
+                let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+                let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                    .map_err(|e| PaciNetError::Internal(e.to_string()))?
+                    .with_timezone(&Utc);
+                let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+                    .map_err(|e| PaciNetError::Internal(e.to_string()))?
+                    .with_timezone(&Utc);
+                Ok(Some(PolicyTemplate {
+                    name,
+                    description,
+                    rules_yaml,
+                    tags,
+                    created_at,
+                    updated_at,
+                }))
+            }
+        }
+    }
+
+    fn list_templates(&self, tag: Option<&str>) -> Result<Vec<PolicyTemplate>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name, description, rules_yaml, tags, created_at, updated_at FROM policy_templates ORDER BY name")
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        let templates: Vec<PolicyTemplate> = stmt
+            .query_map([], |row| {
+                let name: String = row.get(0)?;
+                let description: String = row.get(1)?;
+                let rules_yaml: String = row.get(2)?;
+                let tags_json: String = row.get(3)?;
+                let created_at_str: String = row.get(4)?;
+                let updated_at_str: String = row.get(5)?;
+                Ok((name, description, rules_yaml, tags_json, created_at_str, updated_at_str))
+            })
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .filter_map(|(name, description, rules_yaml, tags_json, created_at_str, updated_at_str)| {
+                let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+                let created_at = DateTime::parse_from_rfc3339(&created_at_str).ok()?.with_timezone(&Utc);
+                let updated_at = DateTime::parse_from_rfc3339(&updated_at_str).ok()?.with_timezone(&Utc);
+                Some(PolicyTemplate { name, description, rules_yaml, tags, created_at, updated_at })
+            })
+            .filter(|t| tag.is_none_or(|tg| t.tags.iter().any(|tt| tt == tg)))
+            .collect();
+
+        Ok(templates)
+    }
+
+    fn delete_template(&self, name: &str) -> Result<bool, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                "DELETE FROM policy_templates WHERE name = ?1",
+                rusqlite::params![name],
+            )
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    // ---- Webhook delivery history ----
+
+    fn store_webhook_delivery(&self, delivery: WebhookDelivery) -> Result<(), PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO webhook_deliveries (id, instance_id, url, method, status_code, success, duration_ms, error, attempt, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                &delivery.id,
+                &delivery.instance_id,
+                &delivery.url,
+                &delivery.method,
+                delivery.status_code.map(|c| c as i64),
+                delivery.success as i32,
+                delivery.duration_ms as i64,
+                &delivery.error,
+                delivery.attempt as i64,
+                delivery.timestamp.to_rfc3339(),
+            ],
+        )
+        .map_err(|e| PaciNetError::Internal(format!("Failed to store webhook delivery: {}", e)))?;
+        Ok(())
+    }
+
+    fn query_webhook_deliveries(
+        &self,
+        instance_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<WebhookDelivery>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match instance_id {
+            Some(id) => (
+                "SELECT id, instance_id, url, method, status_code, success, duration_ms, error, attempt, timestamp FROM webhook_deliveries WHERE instance_id = ?1 ORDER BY timestamp DESC LIMIT ?2".to_string(),
+                vec![Box::new(id.to_string()) as Box<dyn rusqlite::types::ToSql>, Box::new(limit as i64)],
+            ),
+            None => (
+                "SELECT id, instance_id, url, method, status_code, success, duration_ms, error, attempt, timestamp FROM webhook_deliveries ORDER BY timestamp DESC LIMIT ?1".to_string(),
+                vec![Box::new(limit as i64) as Box<dyn rusqlite::types::ToSql>],
+            ),
+        };
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let deliveries: Vec<WebhookDelivery> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let id: String = row.get(0)?;
+                let instance_id: String = row.get(1)?;
+                let url: String = row.get(2)?;
+                let method: String = row.get(3)?;
+                let status_code: Option<i64> = row.get(4)?;
+                let success: i32 = row.get(5)?;
+                let duration_ms: i64 = row.get(6)?;
+                let error: Option<String> = row.get(7)?;
+                let attempt: i64 = row.get(8)?;
+                let ts_str: String = row.get(9)?;
+                Ok((id, instance_id, url, method, status_code, success, duration_ms, error, attempt, ts_str))
+            })
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, instance_id, url, method, status_code, success, duration_ms, error, attempt, ts_str)| {
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str).ok()?.with_timezone(&Utc);
+                Some(WebhookDelivery {
+                    id,
+                    instance_id,
+                    url,
+                    method,
+                    status_code: status_code.map(|c| c as u16),
+                    success: success != 0,
+                    duration_ms: duration_ms as u64,
+                    error,
+                    attempt: attempt as u32,
+                    timestamp,
+                })
+            })
+            .collect();
+
+        Ok(deliveries)
+    }
 }
 
 // Helper functions to convert rusqlite rows to domain types
@@ -926,6 +1258,10 @@ fn row_to_node(row: &rusqlite::Row) -> Result<Node, PaciNetError> {
         .map_err(|e| PaciNetError::Internal(e.to_string()))?
         .with_timezone(&Utc);
 
+    let annotations_json: String = row.get(9).unwrap_or_else(|_| "{}".to_string());
+    let annotations: HashMap<String, String> =
+        serde_json::from_str(&annotations_json).unwrap_or_default();
+
     Ok(Node {
         node_id,
         hostname,
@@ -936,6 +1272,7 @@ fn row_to_node(row: &rusqlite::Row) -> Result<Node, PaciNetError> {
         last_heartbeat,
         pacgate_version,
         uptime_seconds: uptime_seconds as u64,
+        annotations,
     })
 }
 

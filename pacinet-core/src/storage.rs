@@ -161,6 +161,75 @@ pub trait Storage: Send + Sync {
         Ok(0)
     }
 
+    // ---- Node annotations ----
+
+    /// Update annotations on a node: set keys from `set`, remove keys in `remove`.
+    fn update_annotations(
+        &self,
+        _node_id: &str,
+        _set: HashMap<String, String>,
+        _remove: &[String],
+    ) -> Result<(), PaciNetError> {
+        Ok(())
+    }
+
+    // ---- Audit log operations (default no-op) ----
+
+    /// Store an audit log entry.
+    fn store_audit(&self, _entry: AuditEntry) -> Result<(), PaciNetError> {
+        Ok(())
+    }
+
+    /// Query audit log entries with optional filters.
+    fn query_audit(
+        &self,
+        _action: Option<&str>,
+        _resource_type: Option<&str>,
+        _resource_id: Option<&str>,
+        _since: Option<DateTime<Utc>>,
+        _limit: u32,
+    ) -> Result<Vec<AuditEntry>, PaciNetError> {
+        Ok(vec![])
+    }
+
+    // ---- Policy template operations (default no-op) ----
+
+    /// Store a policy template (upsert by name).
+    fn store_template(&self, _template: PolicyTemplate) -> Result<(), PaciNetError> {
+        Ok(())
+    }
+
+    /// Get a policy template by name.
+    fn get_template(&self, _name: &str) -> Result<Option<PolicyTemplate>, PaciNetError> {
+        Ok(None)
+    }
+
+    /// List policy templates, optionally filtered by tag.
+    fn list_templates(&self, _tag: Option<&str>) -> Result<Vec<PolicyTemplate>, PaciNetError> {
+        Ok(vec![])
+    }
+
+    /// Delete a policy template by name. Returns true if it existed.
+    fn delete_template(&self, _name: &str) -> Result<bool, PaciNetError> {
+        Ok(false)
+    }
+
+    // ---- Webhook delivery history (default no-op) ----
+
+    /// Store a webhook delivery record.
+    fn store_webhook_delivery(&self, _delivery: WebhookDelivery) -> Result<(), PaciNetError> {
+        Ok(())
+    }
+
+    /// Query webhook delivery history.
+    fn query_webhook_deliveries(
+        &self,
+        _instance_id: Option<&str>,
+        _limit: u32,
+    ) -> Result<Vec<WebhookDelivery>, PaciNetError> {
+        Ok(vec![])
+    }
+
     // ---- Leader lease operations (default: always leader for single-node) ----
 
     /// Try to acquire or renew the leader lease. Returns true if acquired.

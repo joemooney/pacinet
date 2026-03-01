@@ -1,6 +1,6 @@
 import { useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { RefreshCw, Sun, Moon } from 'lucide-react';
+import { Menu, RefreshCw, Sun, Moon } from 'lucide-react';
 import { useState, useCallback, useEffect } from 'react';
 
 const THEME_KEY = 'pacinet_theme';
@@ -12,9 +12,15 @@ const titles: Record<string, string> = {
   '/counters': 'Counters',
   '/fsm': 'FSM',
   '/watch': 'Watch',
+  '/audit': 'Audit Log',
+  '/templates': 'Templates',
 };
 
-export default function Header() {
+interface HeaderProps {
+  onMenuToggle?: () => void;
+}
+
+export default function Header({ onMenuToggle }: HeaderProps) {
   const location = useLocation();
   const queryClient = useQueryClient();
   const [dark, setDark] = useState(() => {
@@ -35,7 +41,18 @@ export default function Header() {
 
   return (
     <header className="h-14 border-b border-edge flex items-center justify-between px-6 bg-surface-alt">
-      <h1 className="text-lg font-semibold">{title}</h1>
+      <div className="flex items-center gap-3">
+        {onMenuToggle && (
+          <button
+            onClick={onMenuToggle}
+            className="md:hidden p-2 rounded-lg hover:bg-surface-hover text-content-secondary hover:text-content transition-colors"
+            aria-label="Toggle menu"
+          >
+            <Menu size={16} />
+          </button>
+        )}
+        <h1 className="text-lg font-semibold">{title}</h1>
+      </div>
       <div className="flex items-center gap-2">
         <button
           onClick={() => queryClient.invalidateQueries()}

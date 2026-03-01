@@ -280,6 +280,7 @@ fn node_to_proto(node: &Node, policy: Option<&Policy>) -> NodeInfo {
         policy_hash: policy.map(|p| p.policy_hash.clone()).unwrap_or_default(),
         uptime_seconds: node.uptime_seconds,
         last_heartbeat_age_seconds: heartbeat_age,
+        annotations: node.annotations.clone(),
     }
 }
 
@@ -504,6 +505,7 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
                     node_id: node.node_id.clone(),
                     rules_yaml,
                     options,
+                    dry_run: false,
                 };
 
                 // Try deploy with per-node guard and timeout
@@ -716,6 +718,7 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
             node_id: node_id.clone(),
             rules_yaml,
             options,
+            dry_run: false,
         };
 
         // Acquire deploy guard
@@ -1147,6 +1150,235 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
             })),
         }
     }
+
+    // ---- Phase 9: Node Annotations ----
+
+    async fn set_node_annotations(
+        &self,
+        request: Request<SetNodeAnnotationsRequest>,
+    ) -> Result<Response<SetNodeAnnotationsResponse>, Status> {
+        let req = request.into_inner();
+        let node_id = req.node_id.clone();
+        let set = req.annotations;
+        let remove = req.remove_keys;
+        blocking(&self.storage, move |s| {
+            s.update_annotations(&node_id, set, &remove)
+        })
+        .await?;
+
+        Ok(Response::new(SetNodeAnnotationsResponse {
+            success: true,
+            message: "Annotations updated".to_string(),
+        }))
+    }
+
+    // ---- Phase 9: Audit Log ----
+
+    async fn query_audit_log(
+        &self,
+        request: Request<QueryAuditLogRequest>,
+    ) -> Result<Response<QueryAuditLogResponse>, Status> {
+        let req = request.into_inner();
+        let action = if req.action.is_empty() {
+            None
+        } else {
+            Some(req.action)
+        };
+        let resource_type = if req.resource_type.is_empty() {
+            None
+        } else {
+            Some(req.resource_type)
+        };
+        let resource_id = if req.resource_id.is_empty() {
+            None
+        } else {
+            Some(req.resource_id)
+        };
+        let since = req.since.map(|ts| {
+            chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
+                .unwrap_or_else(chrono::Utc::now)
+        });
+        let limit = if req.limit == 0 { 50 } else { req.limit };
+
+        let entries = blocking(&self.storage, move |s| {
+            s.query_audit(
+                action.as_deref(),
+                resource_type.as_deref(),
+                resource_id.as_deref(),
+                since,
+                limit,
+            )
+        })
+        .await?;
+
+        let proto_entries: Vec<AuditEntryInfo> = entries
+            .into_iter()
+            .map(|e| AuditEntryInfo {
+                id: e.id,
+                timestamp: Some(prost_types::Timestamp {
+                    seconds: e.timestamp.timestamp(),
+                    nanos: 0,
+                }),
+                actor: e.actor,
+                action: e.action,
+                resource_type: e.resource_type,
+                resource_id: e.resource_id,
+                details: e.details,
+            })
+            .collect();
+
+        Ok(Response::new(QueryAuditLogResponse {
+            entries: proto_entries,
+        }))
+    }
+
+    // ---- Phase 9: Policy Templates ----
+
+    async fn create_policy_template(
+        &self,
+        request: Request<CreatePolicyTemplateRequest>,
+    ) -> Result<Response<CreatePolicyTemplateResponse>, Status> {
+        let req = request.into_inner();
+        let now = chrono::Utc::now();
+        let template = pacinet_core::PolicyTemplate {
+            name: req.name.clone(),
+            description: req.description,
+            rules_yaml: req.rules_yaml,
+            tags: req.tags,
+            created_at: now,
+            updated_at: now,
+        };
+        let name = template.name.clone();
+
+        blocking(&self.storage, move |s| s.store_template(template)).await?;
+
+        Ok(Response::new(CreatePolicyTemplateResponse {
+            success: true,
+            name: name.clone(),
+            message: format!("Template '{}' created", name),
+        }))
+    }
+
+    async fn get_policy_template(
+        &self,
+        request: Request<GetPolicyTemplateRequest>,
+    ) -> Result<Response<GetPolicyTemplateResponse>, Status> {
+        let req = request.into_inner();
+        let name = req.name.clone();
+        let template = blocking(&self.storage, move |s| s.get_template(&name))
+            .await?
+            .ok_or_else(|| Status::not_found(format!("Template '{}' not found", req.name)))?;
+
+        Ok(Response::new(GetPolicyTemplateResponse {
+            name: template.name,
+            description: template.description,
+            rules_yaml: template.rules_yaml,
+            tags: template.tags,
+            created_at: Some(prost_types::Timestamp {
+                seconds: template.created_at.timestamp(),
+                nanos: 0,
+            }),
+            updated_at: Some(prost_types::Timestamp {
+                seconds: template.updated_at.timestamp(),
+                nanos: 0,
+            }),
+        }))
+    }
+
+    async fn list_policy_templates(
+        &self,
+        request: Request<ListPolicyTemplatesRequest>,
+    ) -> Result<Response<ListPolicyTemplatesResponse>, Status> {
+        let req = request.into_inner();
+        let tag = if req.tag.is_empty() {
+            None
+        } else {
+            Some(req.tag)
+        };
+        let templates = blocking(&self.storage, move |s| s.list_templates(tag.as_deref())).await?;
+
+        let summaries: Vec<PolicyTemplateSummary> = templates
+            .into_iter()
+            .map(|t| PolicyTemplateSummary {
+                name: t.name,
+                description: t.description,
+                tags: t.tags,
+                created_at: Some(prost_types::Timestamp {
+                    seconds: t.created_at.timestamp(),
+                    nanos: 0,
+                }),
+                updated_at: Some(prost_types::Timestamp {
+                    seconds: t.updated_at.timestamp(),
+                    nanos: 0,
+                }),
+            })
+            .collect();
+
+        Ok(Response::new(ListPolicyTemplatesResponse {
+            templates: summaries,
+        }))
+    }
+
+    async fn delete_policy_template(
+        &self,
+        request: Request<DeletePolicyTemplateRequest>,
+    ) -> Result<Response<DeletePolicyTemplateResponse>, Status> {
+        let req = request.into_inner();
+        let name = req.name.clone();
+        let deleted = blocking(&self.storage, move |s| s.delete_template(&name)).await?;
+
+        Ok(Response::new(DeletePolicyTemplateResponse {
+            success: deleted,
+            message: if deleted {
+                format!("Template '{}' deleted", req.name)
+            } else {
+                format!("Template '{}' not found", req.name)
+            },
+        }))
+    }
+
+    // ---- Phase 9: Webhook Delivery History ----
+
+    async fn query_webhook_deliveries(
+        &self,
+        request: Request<QueryWebhookDeliveriesRequest>,
+    ) -> Result<Response<QueryWebhookDeliveriesResponse>, Status> {
+        let req = request.into_inner();
+        let instance_id = if req.instance_id.is_empty() {
+            None
+        } else {
+            Some(req.instance_id)
+        };
+        let limit = if req.limit == 0 { 50 } else { req.limit };
+
+        let deliveries = blocking(&self.storage, move |s| {
+            s.query_webhook_deliveries(instance_id.as_deref(), limit)
+        })
+        .await?;
+
+        let proto_deliveries: Vec<WebhookDeliveryInfo> = deliveries
+            .into_iter()
+            .map(|d| WebhookDeliveryInfo {
+                id: d.id,
+                instance_id: d.instance_id,
+                url: d.url,
+                method: d.method,
+                status_code: d.status_code.map(|c| c as u32).unwrap_or(0),
+                success: d.success,
+                duration_ms: d.duration_ms,
+                error: d.error.unwrap_or_default(),
+                attempt: d.attempt,
+                timestamp: Some(prost_types::Timestamp {
+                    seconds: d.timestamp.timestamp(),
+                    nanos: 0,
+                }),
+            })
+            .collect();
+
+        Ok(Response::new(QueryWebhookDeliveriesResponse {
+            deliveries: proto_deliveries,
+        }))
+    }
 }
 
 fn instance_to_proto(instance: &pacinet_core::FsmInstance) -> FsmInstanceInfo {
@@ -1388,6 +1620,7 @@ impl ManagementService {
             success: outcome.success,
             message: outcome.message,
             warnings: outcome.warnings,
+            dry_run_result: None,
         }))
     }
 }
@@ -1422,5 +1655,6 @@ async fn deploy_single_node(
         success: outcome.success,
         message: outcome.message,
         warnings: outcome.warnings,
+        dry_run_result: None,
     })
 }

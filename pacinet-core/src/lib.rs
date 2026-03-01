@@ -13,7 +13,7 @@ pub use error::PaciNetError;
 pub use fsm::{FsmDefinition, FsmError, FsmInstance, FsmInstanceStatus, FsmKind};
 pub use hash::policy_hash;
 pub use model::{
-    CounterSnapshot, DeploymentRecord, DeploymentResult, Node, NodeState, PersistentEvent, Policy,
-    PolicyVersion, RuleCounter,
+    AuditEntry, CounterSnapshot, DeploymentRecord, DeploymentResult, Node, NodeState,
+    PersistentEvent, Policy, PolicyTemplate, PolicyVersion, RuleCounter, WebhookDelivery,
 };
 pub use storage::{LeaderInfo, StatusSummary, Storage};

@@ -112,17 +112,17 @@ Development certificates can be generated with `make gen-certs` (requires openss
 
 ## Current Status
 
-**Phase 8 complete** — REST tests, auth, event log, HA, dashboard enhancements:
-- **REST integration tests**: 17 tests covering all REST endpoints, auth, SSE, event history
-- **API key authentication**: optional Bearer token / ?token= query param, React auth prompt on 401
-- **Persistent event log**: events stored in SQLite/memory, queryable via /api/events/history with filters
-- **Multi-controller HA**: lease-based leader election via SQLite, leader guards on write operations
-- **Dashboard enhancements**: recharts PieChart/LineChart, sortable tables, node grid view, event history tab, dark mode persistence
-- **mDNS placeholder**: --mdns-discover flag with runtime message (full mdns-sd integration deferred)
-- **Health endpoint**: /api/health (no auth required) with status, auth_required, role
-- 110 tests (32 core, 30 server unit, 10 agent, 21 integration, 17 REST integration) all passing, clippy clean
+**Phase 9 complete** — Audit logging, policy templates, dry-run deploy, node annotations, webhook history:
+- **Node annotations**: key-value metadata on nodes (set/remove), REST/gRPC/CLI/dashboard
+- **Audit logging**: tracks all write operations (deploy, remove, FSM ops, templates) with actor, action, resource details; filterable queries
+- **Policy templates**: reusable named YAML templates with tags, CRUD via REST/gRPC/CLI, dashboard page with create form
+- **Webhook delivery history**: per-attempt tracking (status, duration, errors) linked to FSM instances, queryable
+- **Dry-run deploy**: validate YAML, compute hash diff, preview per-node changes without executing; CLI --dry-run flag, dashboard preview button
+- **Dashboard updates**: Audit page, Templates page, DryRunPreview component, annotations editor on NodeDetail, webhook history on InstanceDetail
+- 115 tests (32 core, 30 server unit, 10 agent, 21 integration, 22 REST integration) all passing, clippy clean
 
 Previous phases:
+- Phase 8: REST tests, auth, event log, HA, dashboard enhancements
 - Phase 7: Web dashboard with REST API, SSE streaming, React SPA
 - Phase 6: gRPC server-side streaming, EventBus, CLI watch commands
 - Phase 5b: Counter rate tracking & adaptive policy FSMs, webhook delivery

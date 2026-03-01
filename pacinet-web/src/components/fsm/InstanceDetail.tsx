@@ -1,8 +1,10 @@
 import { useFsmInstance } from '../../hooks/useFsm';
+import { useWebhookDeliveries } from '../../hooks/useWebhooks';
 import { formatTimestamp, statusColorClass } from '../../lib/utils';
 import Badge from '../ui/Badge';
 import Card from '../ui/Card';
 import Spinner from '../ui/Spinner';
+import Table from '../ui/Table';
 
 interface InstanceDetailProps {
   instanceId: string;
@@ -11,6 +13,7 @@ interface InstanceDetailProps {
 
 export default function InstanceDetail({ instanceId, onClose }: InstanceDetailProps) {
   const { data: instance, isLoading } = useFsmInstance(instanceId);
+  const { data: webhookDeliveries } = useWebhookDeliveries(instanceId);
 
   return (
     <div className="fixed inset-y-0 right-0 w-[480px] bg-surface-alt border-l border-edge shadow-xl overflow-y-auto animate-slide-in-right z-50">
@@ -96,6 +99,28 @@ export default function InstanceDetail({ instanceId, onClose }: InstanceDetailPr
                 ))}
               </div>
             </Card>
+
+            {webhookDeliveries && webhookDeliveries.length > 0 && (
+              <Card title="Webhook Deliveries">
+                <div className="overflow-x-auto">
+                  <Table headers={['Time', 'URL', 'Status', 'Duration', 'Result']}>
+                    {webhookDeliveries.map((d) => (
+                      <tr key={d.id}>
+                        <td className="px-3 py-2 text-xs text-content-muted whitespace-nowrap">{formatTimestamp(d.timestamp)}</td>
+                        <td className="px-3 py-2 text-xs font-mono max-w-[150px] truncate">{d.url}</td>
+                        <td className="px-3 py-2 text-xs">{d.status_code || '-'}</td>
+                        <td className="px-3 py-2 text-xs text-right">{d.duration_ms}ms</td>
+                        <td className="px-3 py-2">
+                          <Badge className={d.success ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}>
+                            {d.success ? 'OK' : d.error || 'Failed'}
+                          </Badge>
+                        </td>
+                      </tr>
+                    ))}
+                  </Table>
+                </div>
+              </Card>
+            )}
           </div>
         )}
       </div>

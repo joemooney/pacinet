@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../api/client';
-import type { DeployResponse, BatchDeployResultJson } from '../types/api';
+import type { DeployResponse, BatchDeployResultJson, DryRunDeployResponse } from '../types/api';
 
 interface DeployParams {
   node_id: string;
@@ -45,5 +45,15 @@ export function useBatchDeploy() {
       queryClient.invalidateQueries({ queryKey: ['nodes'] });
       queryClient.invalidateQueries({ queryKey: ['fleet'] });
     },
+  });
+}
+
+export function useDryRunDeploy() {
+  return useMutation({
+    mutationFn: (params: DeployParams) =>
+      apiFetch<DryRunDeployResponse>('/api/deploy', {
+        method: 'POST',
+        body: JSON.stringify({ ...params, dry_run: true }),
+      }),
   });
 }

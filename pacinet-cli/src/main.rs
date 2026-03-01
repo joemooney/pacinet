@@ -68,6 +68,9 @@ enum Commands {
         /// Enable connection tracking
         #[arg(long)]
         conntrack: bool,
+        /// Dry-run mode: validate and preview without deploying
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Show deployed policy
     Policy {
@@ -110,8 +113,73 @@ enum Commands {
         #[command(subcommand)]
         action: WatchCommands,
     },
+    /// Query audit log
+    Audit {
+        /// Filter by action
+        #[arg(long)]
+        action: Option<String>,
+        /// Filter by resource type
+        #[arg(long)]
+        resource_type: Option<String>,
+        /// Max entries
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
+    /// Manage policy templates
+    Template {
+        #[command(subcommand)]
+        action: TemplateCommands,
+    },
     /// Show version
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum TemplateCommands {
+    /// Create a template from a YAML file
+    Create {
+        /// Path to rules YAML file
+        file: String,
+        /// Template name
+        #[arg(long)]
+        name: String,
+        /// Description
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Tags (comma-separated)
+        #[arg(long, default_value = "")]
+        tags: String,
+    },
+    /// List templates
+    List {
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Show a template
+    Show {
+        /// Template name
+        name: String,
+    },
+    /// Delete a template
+    Delete {
+        /// Template name
+        name: String,
+    },
+    /// Deploy from a template
+    Deploy {
+        /// Template name
+        name: String,
+        /// Target node ID
+        #[arg(long)]
+        node: String,
+        /// Enable counters
+        #[arg(long)]
+        counters: bool,
+        /// Dry-run mode
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -131,6 +199,17 @@ enum NodeCommands {
     Remove {
         /// Node ID
         node_id: String,
+    },
+    /// Set annotations on a node (key=value pairs)
+    Annotate {
+        /// Node ID
+        node_id: String,
+        /// Annotations (key=value)
+        #[arg(value_parser = parse_label)]
+        annotations: Vec<(String, String)>,
+        /// Keys to remove
+        #[arg(long)]
+        remove: Vec<String>,
     },
 }
 
@@ -351,6 +430,7 @@ async fn main() -> Result<()> {
             counters,
             rate_limit,
             conntrack,
+            dry_run,
         } => {
             handle_deploy(
                 &cli.server,
@@ -360,6 +440,7 @@ async fn main() -> Result<()> {
                 counters,
                 rate_limit,
                 conntrack,
+                dry_run,
                 &tls_config,
             )
             .await?
@@ -393,6 +474,16 @@ async fn main() -> Result<()> {
         }
         Commands::Watch { action } => {
             handle_watch(action, &cli.server, cli.json, &tls_config).await?
+        }
+        Commands::Audit {
+            action,
+            resource_type,
+            limit,
+        } => {
+            handle_audit(&cli.server, action, resource_type, limit, cli.json, &tls_config).await?
+        }
+        Commands::Template { action } => {
+            handle_template(action, &cli.server, cli.json, &tls_config).await?
         }
         Commands::Version => {
             println!("pacinet {}", env!("CARGO_PKG_VERSION"));
@@ -504,6 +595,12 @@ async fn handle_node(
                             println!("  {}={}", k, v);
                         }
                     }
+                    if !node.annotations.is_empty() {
+                        println!("Annotations:");
+                        for (k, v) in &node.annotations {
+                            println!("  {}={}", k, v);
+                        }
+                    }
                 }
             } else {
                 eprintln!("Node {} not found", node_id);
@@ -523,6 +620,28 @@ async fn handle_node(
                 eprintln!("{}", response.message);
             }
         }
+        NodeCommands::Annotate {
+            node_id,
+            annotations,
+            remove,
+        } => {
+            let ann_map: std::collections::HashMap<String, String> =
+                annotations.into_iter().collect();
+            let response = client
+                .set_node_annotations(pacinet_proto::SetNodeAnnotationsRequest {
+                    node_id: node_id.clone(),
+                    annotations: ann_map,
+                    remove_keys: remove,
+                })
+                .await?
+                .into_inner();
+
+            if response.success {
+                println!("Annotations updated for node {}", node_id);
+            } else {
+                eprintln!("{}", response.message);
+            }
+        }
     }
 
     Ok(())
@@ -537,6 +656,7 @@ async fn handle_deploy(
     counters: bool,
     rate_limit: bool,
     conntrack: bool,
+    dry_run: bool,
     tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) -> Result<()> {
     let rules_yaml = std::fs::read_to_string(rules_file)
@@ -557,17 +677,52 @@ async fn handle_deploy(
                 node_id: nid.to_string(),
                 rules_yaml,
                 options,
+                dry_run,
             })
             .await?
             .into_inner();
 
-        if response.success {
-            println!("Policy deployed to {}", nid);
+        if dry_run {
+            if let Some(dr) = response.dry_run_result {
+                println!("Dry-run result:");
+                println!("  Valid: {}", dr.valid);
+                if !dr.validation_errors.is_empty() {
+                    println!("  Errors:");
+                    for e in &dr.validation_errors {
+                        println!("    - {}", e);
+                    }
+                }
+                if !dr.target_nodes.is_empty() {
+                    println!("\n  {:<38} {:<15} {:<16} {:<16} CHANGED", "NODE ID", "HOSTNAME", "CURRENT HASH", "NEW HASH");
+                    for n in &dr.target_nodes {
+                        let cur = if n.current_policy_hash.is_empty() {
+                            "-".to_string()
+                        } else if n.current_policy_hash.len() > 12 {
+                            n.current_policy_hash[..12].to_string()
+                        } else {
+                            n.current_policy_hash.clone()
+                        };
+                        let new_h = if n.new_policy_hash.len() > 12 {
+                            n.new_policy_hash[..12].to_string()
+                        } else {
+                            n.new_policy_hash.clone()
+                        };
+                        let changed = if n.policy_changed { "yes" } else { "no" };
+                        println!("  {:<38} {:<15} {:<16} {:<16} {}", n.node_id, n.hostname, cur, new_h, changed);
+                    }
+                }
+            } else {
+                println!("Dry-run completed (no details returned)");
+            }
         } else {
-            eprintln!("Deployment failed: {}", response.message);
-        }
-        for warning in &response.warnings {
-            eprintln!("  warning: {}", warning);
+            if response.success {
+                println!("Policy deployed to {}", nid);
+            } else {
+                eprintln!("Deployment failed: {}", response.message);
+            }
+            for warning in &response.warnings {
+                eprintln!("  warning: {}", warning);
+            }
         }
     } else {
         // Batch deploy by label
@@ -578,6 +733,7 @@ async fn handle_deploy(
                 label_filter,
                 rules_yaml,
                 options,
+                dry_run,
             })
             .await?
             .into_inner();
@@ -1443,6 +1599,257 @@ async fn handle_watch(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_audit(
+    server: &str,
+    action: Option<String>,
+    resource_type: Option<String>,
+    limit: u32,
+    as_json: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
+) -> Result<()> {
+    let mut client = connect(server, tls_config).await?;
+
+    let response = client
+        .query_audit_log(pacinet_proto::QueryAuditLogRequest {
+            action: action.unwrap_or_default(),
+            resource_type: resource_type.unwrap_or_default(),
+            resource_id: String::new(),
+            since: None,
+            limit,
+        })
+        .await?
+        .into_inner();
+
+    if as_json {
+        let entries: Vec<_> = response
+            .entries
+            .iter()
+            .map(|e| {
+                json!({
+                    "id": e.id,
+                    "timestamp": e.timestamp.as_ref().map(|t| t.seconds),
+                    "actor": e.actor,
+                    "action": e.action,
+                    "resource_type": e.resource_type,
+                    "resource_id": e.resource_id,
+                    "details": e.details,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else if response.entries.is_empty() {
+        println!("No audit entries found");
+    } else {
+        println!(
+            "{:<20} {:<10} {:<16} {:<12} {:<38} DETAILS",
+            "TIMESTAMP", "ACTOR", "ACTION", "TYPE", "RESOURCE ID"
+        );
+        for e in &response.entries {
+            let time = e
+                .timestamp
+                .as_ref()
+                .and_then(|t| {
+                    chrono::DateTime::from_timestamp(t.seconds, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                })
+                .unwrap_or_else(|| "-".to_string());
+            let details_short = if e.details.len() > 40 {
+                format!("{}...", &e.details[..40])
+            } else {
+                e.details.clone()
+            };
+            println!(
+                "{:<20} {:<10} {:<16} {:<12} {:<38} {}",
+                time, e.actor, e.action, e.resource_type, e.resource_id, details_short
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_template(
+    action: TemplateCommands,
+    server: &str,
+    as_json: bool,
+    tls_config: &Option<pacinet_core::tls::TlsConfig>,
+) -> Result<()> {
+    let mut client = connect(server, tls_config).await?;
+
+    match action {
+        TemplateCommands::Create {
+            file,
+            name,
+            description,
+            tags,
+        } => {
+            let rules_yaml = std::fs::read_to_string(&file)
+                .context(format!("Failed to read rules file: {}", file))?;
+
+            let tag_list: Vec<String> = if tags.is_empty() {
+                vec![]
+            } else {
+                tags.split(',').map(|s| s.trim().to_string()).collect()
+            };
+
+            let response = client
+                .create_policy_template(pacinet_proto::CreatePolicyTemplateRequest {
+                    name: name.clone(),
+                    description,
+                    rules_yaml,
+                    tags: tag_list,
+                })
+                .await?
+                .into_inner();
+
+            if response.success {
+                println!("Template '{}' created", response.name);
+            } else {
+                eprintln!("Failed: {}", response.message);
+            }
+        }
+        TemplateCommands::List { tag } => {
+            let response = client
+                .list_policy_templates(pacinet_proto::ListPolicyTemplatesRequest {
+                    tag: tag.unwrap_or_default(),
+                })
+                .await?
+                .into_inner();
+
+            if as_json {
+                let templates: Vec<_> = response
+                    .templates
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "tags": t.tags,
+                            "created_at": t.created_at.as_ref().map(|ts| ts.seconds),
+                            "updated_at": t.updated_at.as_ref().map(|ts| ts.seconds),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&templates)?);
+            } else if response.templates.is_empty() {
+                println!("No templates found");
+            } else {
+                println!(
+                    "{:<25} {:<30} TAGS",
+                    "NAME", "DESCRIPTION"
+                );
+                for t in &response.templates {
+                    let tags_str = t.tags.join(", ");
+                    let desc = if t.description.len() > 28 {
+                        format!("{}...", &t.description[..28])
+                    } else {
+                        t.description.clone()
+                    };
+                    println!("{:<25} {:<30} {}", t.name, desc, tags_str);
+                }
+            }
+        }
+        TemplateCommands::Show { name } => {
+            let response = client
+                .get_policy_template(pacinet_proto::GetPolicyTemplateRequest {
+                    name: name.clone(),
+                })
+                .await?
+                .into_inner();
+
+            if as_json {
+                let val = json!({
+                    "name": response.name,
+                    "description": response.description,
+                    "tags": response.tags,
+                    "rules_yaml": response.rules_yaml,
+                    "created_at": response.created_at.as_ref().map(|t| t.seconds),
+                    "updated_at": response.updated_at.as_ref().map(|t| t.seconds),
+                });
+                println!("{}", serde_json::to_string_pretty(&val)?);
+            } else {
+                println!("Name:        {}", response.name);
+                println!("Description: {}", response.description);
+                if !response.tags.is_empty() {
+                    println!("Tags:        {}", response.tags.join(", "));
+                }
+                println!("---");
+                println!("{}", response.rules_yaml);
+            }
+        }
+        TemplateCommands::Delete { name } => {
+            let response = client
+                .delete_policy_template(pacinet_proto::DeletePolicyTemplateRequest {
+                    name: name.clone(),
+                })
+                .await?
+                .into_inner();
+
+            if response.success {
+                println!("Template '{}' deleted", name);
+            } else {
+                eprintln!("{}", response.message);
+            }
+        }
+        TemplateCommands::Deploy {
+            name,
+            node,
+            counters,
+            dry_run,
+        } => {
+            // Fetch template first
+            let template = client
+                .get_policy_template(pacinet_proto::GetPolicyTemplateRequest {
+                    name: name.clone(),
+                })
+                .await?
+                .into_inner();
+
+            if template.rules_yaml.is_empty() {
+                eprintln!("Template '{}' not found or has no rules", name);
+                return Ok(());
+            }
+
+            // Deploy using the template's rules
+            let response = client
+                .deploy_policy(pacinet_proto::DeployPolicyRequest {
+                    node_id: node.clone(),
+                    rules_yaml: template.rules_yaml,
+                    options: Some(pacinet_proto::CompileOptions {
+                        counters,
+                        rate_limit: false,
+                        conntrack: false,
+                    }),
+                    dry_run,
+                })
+                .await?
+                .into_inner();
+
+            if dry_run {
+                if let Some(dr) = response.dry_run_result {
+                    println!("Dry-run from template '{}':", name);
+                    println!("  Valid: {}", dr.valid);
+                    for e in &dr.validation_errors {
+                        println!("    - {}", e);
+                    }
+                    for n in &dr.target_nodes {
+                        let changed = if n.policy_changed { "changed" } else { "unchanged" };
+                        println!("  {} ({}): {}", n.node_id, n.hostname, changed);
+                    }
+                } else {
+                    println!("Dry-run completed");
+                }
+            } else if response.success {
+                println!("Template '{}' deployed to {}", name, node);
+            } else {
+                eprintln!("Deploy failed: {}", response.message);
             }
         }
     }

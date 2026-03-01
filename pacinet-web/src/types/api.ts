@@ -3,6 +3,7 @@ export interface NodeJson {
   hostname: string;
   agent_address: string;
   labels: Record<string, string>;
+  annotations: Record<string, string>;
   state: string;
   registered_at: string;
   last_heartbeat: string;
@@ -173,6 +174,77 @@ export interface HealthResponse {
   status: string;
   auth_required: boolean;
   role: string;
+}
+
+// Phase 9: Node annotations (added to NodeJson above)
+// annotations: Record<string, string>
+
+// Phase 9: Audit log
+export interface AuditEntryJson {
+  id: string;
+  timestamp: string;
+  actor: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  details: string;
+}
+
+// Phase 9: Policy templates
+export interface PolicyTemplateJson {
+  name: string;
+  description: string;
+  rules_yaml: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PolicyTemplateSummaryJson {
+  name: string;
+  description: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTemplateResponse {
+  success: boolean;
+  name: string;
+  message: string;
+}
+
+// Phase 9: Webhook delivery history
+export interface WebhookDeliveryJson {
+  id: string;
+  instance_id: string;
+  url: string;
+  method: string;
+  status_code: number | null;
+  success: boolean;
+  duration_ms: number;
+  error: string | null;
+  attempt: number;
+  timestamp: string;
+}
+
+// Phase 9: Dry-run deploy
+export interface DryRunResultJson {
+  valid: boolean;
+  validation_errors: string[];
+  target_nodes: DryRunNodeJson[];
+}
+
+export interface DryRunNodeJson {
+  node_id: string;
+  hostname: string;
+  current_policy_hash: string;
+  new_policy_hash: string;
+  policy_changed: boolean;
+}
+
+export interface DryRunDeployResponse extends DeployResponse {
+  dry_run_result?: DryRunResultJson;
 }
 
 // SSE event types

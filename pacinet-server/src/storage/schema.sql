@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     registered_at TEXT NOT NULL,
     last_heartbeat TEXT NOT NULL,
     pacgate_version TEXT NOT NULL DEFAULT '',
-    uptime_seconds INTEGER NOT NULL DEFAULT 0
+    uptime_seconds INTEGER NOT NULL DEFAULT 0,
+    annotations TEXT NOT NULL DEFAULT '{}'  -- JSON
 );
 
 CREATE TABLE IF NOT EXISTS policies (
@@ -102,3 +103,43 @@ CREATE TABLE IF NOT EXISTS leader_lease (
     lease_expires_at TEXT NOT NULL,
     acquired_at TEXT NOT NULL
 );
+
+-- Phase 9: Audit log
+CREATE TABLE IF NOT EXISTS audit_log (
+    id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+
+-- Phase 9: Policy templates
+CREATE TABLE IF NOT EXISTS policy_templates (
+    name TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    rules_yaml TEXT NOT NULL,
+    tags TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Phase 9: Webhook delivery history
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    method TEXT NOT NULL DEFAULT 'POST',
+    status_code INTEGER,
+    success INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    timestamp TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_instance ON webhook_deliveries(instance_id, timestamp DESC);

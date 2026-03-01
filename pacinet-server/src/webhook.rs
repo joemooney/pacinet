@@ -23,7 +23,13 @@ pub struct WebhookPayload {
 
 /// Deliver a webhook payload to the configured endpoint.
 /// Retries with exponential backoff on failure.
-pub async fn deliver_webhook(config: &WebhookConfig, payload: &WebhookPayload) {
+/// Optionally records delivery history to storage.
+pub async fn deliver_webhook(
+    config: &WebhookConfig,
+    payload: &WebhookPayload,
+    storage: Option<&std::sync::Arc<dyn pacinet_core::Storage>>,
+    instance_id: &str,
+) {
     let max_retries = config.max_retries.unwrap_or(2);
     let timeout_secs = config.timeout_seconds.unwrap_or(10);
     let method = config.method.as_deref().unwrap_or("POST");
@@ -41,6 +47,7 @@ pub async fn deliver_webhook(config: &WebhookConfig, payload: &WebhookPayload) {
     };
 
     for attempt in 0..=max_retries {
+        let start = tokio::time::Instant::now();
         let mut request = match method.to_uppercase().as_str() {
             "PUT" => client.put(&config.url),
             "PATCH" => client.patch(&config.url),
@@ -65,6 +72,7 @@ pub async fn deliver_webhook(config: &WebhookConfig, payload: &WebhookPayload) {
         match request.send().await {
             Ok(resp) => {
                 let status = resp.status();
+                let duration_ms = start.elapsed().as_millis() as u64;
                 if status.is_success() {
                     info!(
                         url = %config.url,
@@ -73,6 +81,17 @@ pub async fn deliver_webhook(config: &WebhookConfig, payload: &WebhookPayload) {
                         "Webhook delivered successfully"
                     );
                     m::record_webhook_delivery("success");
+                    record_delivery(
+                        storage,
+                        instance_id,
+                        &config.url,
+                        method,
+                        Some(status.as_u16()),
+                        true,
+                        duration_ms,
+                        None,
+                        attempt,
+                    );
                     return;
                 }
                 warn!(
@@ -81,13 +100,36 @@ pub async fn deliver_webhook(config: &WebhookConfig, payload: &WebhookPayload) {
                     attempt = attempt,
                     "Webhook returned non-success status"
                 );
+                record_delivery(
+                    storage,
+                    instance_id,
+                    &config.url,
+                    method,
+                    Some(status.as_u16()),
+                    false,
+                    duration_ms,
+                    Some(format!("HTTP {}", status)),
+                    attempt,
+                );
             }
             Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
                 warn!(
                     url = %config.url,
                     error = %e,
                     attempt = attempt,
                     "Webhook delivery failed"
+                );
+                record_delivery(
+                    storage,
+                    instance_id,
+                    &config.url,
+                    method,
+                    None,
+                    false,
+                    duration_ms,
+                    Some(e.to_string()),
+                    attempt,
                 );
             }
         }
@@ -104,4 +146,36 @@ pub async fn deliver_webhook(config: &WebhookConfig, payload: &WebhookPayload) {
         "Webhook delivery exhausted all retries"
     );
     m::record_webhook_delivery("exhausted");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_delivery(
+    storage: Option<&std::sync::Arc<dyn pacinet_core::Storage>>,
+    instance_id: &str,
+    url: &str,
+    method: &str,
+    status_code: Option<u16>,
+    success: bool,
+    duration_ms: u64,
+    error: Option<String>,
+    attempt: u32,
+) {
+    if let Some(s) = storage {
+        let delivery = pacinet_core::WebhookDelivery {
+            id: uuid::Uuid::new_v4().to_string(),
+            instance_id: instance_id.to_string(),
+            url: url.to_string(),
+            method: method.to_string(),
+            status_code,
+            success,
+            duration_ms,
+            error,
+            attempt,
+            timestamp: Utc::now(),
+        };
+        let storage = s.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = storage.store_webhook_delivery(delivery);
+        });
+    }
 }

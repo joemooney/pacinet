@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useNodes } from '../../hooks/useNodes';
-import { useDeployPolicy, useBatchDeploy } from '../../hooks/useDeploy';
+import { useDeployPolicy, useBatchDeploy, useDryRunDeploy } from '../../hooks/useDeploy';
 import Card from '../ui/Card';
 import Button from '../ui/Button';
 import Badge from '../ui/Badge';
+import DryRunPreview from './DryRunPreview';
 import { statusColorClass } from '../../lib/utils';
 
 type Mode = 'single' | 'batch';
@@ -20,6 +21,7 @@ export default function DeployPage() {
   const { data: nodes } = useNodes();
   const deployPolicy = useDeployPolicy();
   const batchDeploy = useBatchDeploy();
+  const dryRunDeploy = useDryRunDeploy();
 
   const handleDeploy = () => {
     if (mode === 'single') {
@@ -48,10 +50,23 @@ export default function DeployPage() {
     }
   };
 
-  const isPending = deployPolicy.isPending || batchDeploy.isPending;
+  const handleDryRun = () => {
+    if (mode === 'single' && nodeId && rulesYaml) {
+      dryRunDeploy.mutate({
+        node_id: nodeId,
+        rules_yaml: rulesYaml,
+        counters,
+        rate_limit: rateLimit,
+        conntrack,
+      });
+    }
+  };
+
+  const isPending = deployPolicy.isPending || batchDeploy.isPending || dryRunDeploy.isPending;
   const result = mode === 'single' ? deployPolicy.data : undefined;
   const batchResult = mode === 'batch' ? batchDeploy.data : undefined;
-  const error = deployPolicy.error || batchDeploy.error;
+  const dryRunResult = dryRunDeploy.data?.dry_run_result;
+  const error = deployPolicy.error || batchDeploy.error || dryRunDeploy.error;
 
   return (
     <div className="max-w-2xl animate-fade-in space-y-6">
@@ -134,9 +149,20 @@ export default function DeployPage() {
           </label>
         </div>
 
-        <Button onClick={handleDeploy} disabled={isPending || !rulesYaml}>
-          {isPending ? 'Deploying...' : 'Deploy'}
-        </Button>
+        <div className="flex gap-2">
+          <Button onClick={handleDeploy} disabled={isPending || !rulesYaml}>
+            {deployPolicy.isPending || batchDeploy.isPending ? 'Deploying...' : 'Deploy'}
+          </Button>
+          {mode === 'single' && (
+            <button
+              onClick={handleDryRun}
+              disabled={isPending || !rulesYaml || !nodeId}
+              className="px-4 py-2 text-sm rounded-lg border border-edge text-content-secondary hover:text-content hover:bg-surface-hover transition-colors disabled:opacity-50"
+            >
+              {dryRunDeploy.isPending ? 'Previewing...' : 'Preview (Dry Run)'}
+            </button>
+          )}
+        </div>
       </Card>
 
       {/* Result display */}
@@ -176,6 +202,8 @@ export default function DeployPage() {
           </div>
         </Card>
       )}
+
+      {dryRunResult && <DryRunPreview result={dryRunResult} />}
 
       {error && (
         <Card title="Error">

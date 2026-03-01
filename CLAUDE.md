@@ -12,7 +12,11 @@
 - **YAML-defined FSM engine**: operator-defined deployment state machines (canary, staged, rollback)
 - **Adaptive policy FSMs**: counter-rate-driven state machines for automated escalation/de-escalation (e.g., DDoS mitigation)
 - **Counter rate tracking**: in-memory ring buffer of counter snapshots, rate calculation, multi-node aggregation (any/all/sum)
-- **Webhook alerts**: FSM alert actions deliver JSON payloads via HTTP webhooks with bearer/basic auth and retry
+- **Webhook alerts**: FSM alert actions deliver JSON payloads via HTTP webhooks with bearer/basic auth and retry, delivery history tracked
+- **Node annotations**: key-value metadata on nodes for operator notes (tickets, env, maintenance tags)
+- **Audit logging**: all write operations tracked with actor, action, resource details; queryable
+- **Policy templates**: named reusable YAML templates with tags, CRUD and deploy-from-template
+- **Dry-run deploy**: validate and preview without executing — hash diff, per-node change detection
 - **Server-side streaming**: WatchFsmEvents, WatchCounters, WatchNodeEvents for real-time event observation
 - **SSE streaming**: REST API endpoints for browser-based real-time event observation
 - **EventBus**: broadcast channels (FSM, counter, node) for decoupled event emission and streaming delivery
@@ -61,7 +65,7 @@
 ### gRPC Services
 - **PaciNetController** (agent → controller): RegisterNode, Heartbeat, ReportCounters
 - **PaciNetAgent** (controller → agent): DeployRules, GetCounters, GetStatus
-- **PaciNetManagement** (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy, CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm, WatchFsmEvents (stream), WatchCounters (stream), WatchNodeEvents (stream)
+- **PaciNetManagement** (CLI → controller): ListNodes, GetNode, RemoveNode, DeployPolicy, GetPolicy, GetNodeCounters, GetAggregateCounters, BatchDeployPolicy, GetFleetStatus, GetPolicyHistory, GetDeploymentHistory, RollbackPolicy, CreateFsmDefinition, GetFsmDefinition, ListFsmDefinitions, DeleteFsmDefinition, StartFsm, GetFsmInstance, ListFsmInstances, AdvanceFsm, CancelFsm, WatchFsmEvents (stream), WatchCounters (stream), WatchNodeEvents (stream), SetNodeAnnotations, QueryAuditLog, CreatePolicyTemplate, GetPolicyTemplate, ListPolicyTemplates, DeletePolicyTemplate, QueryWebhookDeliveries
 
 ## Common Commands
 ```bash
@@ -127,6 +131,12 @@ make web-build                 # Build React app to pacinet-web/dist/
 - **Leader election** (`leader.rs`): lease-based via SQLite `leader_lease` table; `BEGIN IMMEDIATE` transactions for atomic acquisition; renewal at lease_duration/2; `Arc<AtomicBool>` is_leader flag shared with config
 - **Leader guards**: REST write endpoints return 503 when standby; gRPC write operations blocked; FSM engine skips evaluation; reaper skips on standby
 - **Dashboard enhancements**: recharts PieChart (StatusChart), LineChart (CounterRateChart), sortable Table, NodeGrid card view, event history tab on WatchPage, dark mode persistence in localStorage
+- **Audit page**: filterable table with action/resource_type dropdowns
+- **Templates page**: CRUD form + list with tag filtering
+- **Dry-run preview**: DryRunPreview component on Deploy page showing validation and hash diff
+- **Node annotations editor**: inline add/remove on NodeDetail panel
+- **Webhook history**: delivery table on InstanceDetail panel
+- **Storage trait default methods**: new Phase 9 trait methods have `Ok(...)` defaults for backward compatibility
 
 ## Port Assignments
 - Controller gRPC: 50054

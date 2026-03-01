@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 const MAX_MEMORY_EVENTS: usize = 10_000;
+const MAX_MEMORY_AUDIT: usize = 10_000;
 
 /// In-memory storage backend (replaces NodeRegistry from Phase 2).
 pub struct MemoryStorage {
@@ -19,6 +20,9 @@ pub struct MemoryStorage {
     fsm_definitions: RwLock<HashMap<String, FsmDefinition>>,
     fsm_instances: RwLock<HashMap<String, FsmInstance>>,
     events: RwLock<Vec<PersistentEvent>>,
+    audit_log: RwLock<Vec<AuditEntry>>,
+    templates: RwLock<HashMap<String, PolicyTemplate>>,
+    webhook_deliveries: RwLock<Vec<WebhookDelivery>>,
 }
 
 impl Default for MemoryStorage {
@@ -33,6 +37,9 @@ impl Default for MemoryStorage {
             fsm_definitions: RwLock::new(HashMap::new()),
             fsm_instances: RwLock::new(HashMap::new()),
             events: RwLock::new(Vec::new()),
+            audit_log: RwLock::new(Vec::new()),
+            templates: RwLock::new(HashMap::new()),
+            webhook_deliveries: RwLock::new(Vec::new()),
         }
     }
 }
@@ -350,6 +357,107 @@ impl Storage for MemoryStorage {
 
     fn count_events(&self) -> Result<u64, PaciNetError> {
         Ok(self.events.read().unwrap().len() as u64)
+    }
+
+    // ---- Node annotations ----
+
+    fn update_annotations(
+        &self,
+        node_id: &str,
+        set: HashMap<String, String>,
+        remove: &[String],
+    ) -> Result<(), PaciNetError> {
+        let mut nodes = self.nodes.write().unwrap();
+        let node = nodes
+            .get_mut(node_id)
+            .ok_or_else(|| PaciNetError::NodeNotFound(node_id.to_string()))?;
+        for key in remove {
+            node.annotations.remove(key);
+        }
+        node.annotations.extend(set);
+        Ok(())
+    }
+
+    // ---- Audit log ----
+
+    fn store_audit(&self, entry: AuditEntry) -> Result<(), PaciNetError> {
+        let mut log = self.audit_log.write().unwrap();
+        log.push(entry);
+        if log.len() > MAX_MEMORY_AUDIT {
+            let drain_count = log.len() - MAX_MEMORY_AUDIT;
+            log.drain(..drain_count);
+        }
+        Ok(())
+    }
+
+    fn query_audit(
+        &self,
+        action: Option<&str>,
+        resource_type: Option<&str>,
+        resource_id: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        limit: u32,
+    ) -> Result<Vec<AuditEntry>, PaciNetError> {
+        let log = self.audit_log.read().unwrap();
+        Ok(log
+            .iter()
+            .rev()
+            .filter(|e| action.is_none_or(|a| e.action == a))
+            .filter(|e| resource_type.is_none_or(|rt| e.resource_type == rt))
+            .filter(|e| resource_id.is_none_or(|ri| e.resource_id == ri))
+            .filter(|e| since.is_none_or(|s| e.timestamp >= s))
+            .take(limit as usize)
+            .cloned()
+            .collect())
+    }
+
+    // ---- Policy templates ----
+
+    fn store_template(&self, template: PolicyTemplate) -> Result<(), PaciNetError> {
+        self.templates
+            .write()
+            .unwrap()
+            .insert(template.name.clone(), template);
+        Ok(())
+    }
+
+    fn get_template(&self, name: &str) -> Result<Option<PolicyTemplate>, PaciNetError> {
+        Ok(self.templates.read().unwrap().get(name).cloned())
+    }
+
+    fn list_templates(&self, tag: Option<&str>) -> Result<Vec<PolicyTemplate>, PaciNetError> {
+        let templates = self.templates.read().unwrap();
+        Ok(templates
+            .values()
+            .filter(|t| tag.is_none_or(|tg| t.tags.iter().any(|tt| tt == tg)))
+            .cloned()
+            .collect())
+    }
+
+    fn delete_template(&self, name: &str) -> Result<bool, PaciNetError> {
+        Ok(self.templates.write().unwrap().remove(name).is_some())
+    }
+
+    // ---- Webhook delivery history ----
+
+    fn store_webhook_delivery(&self, delivery: WebhookDelivery) -> Result<(), PaciNetError> {
+        self.webhook_deliveries.write().unwrap().push(delivery);
+        Ok(())
+    }
+
+    fn query_webhook_deliveries(
+        &self,
+        instance_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<WebhookDelivery>, PaciNetError> {
+        let deliveries = self.webhook_deliveries.read().unwrap();
+        Ok(deliveries
+            .iter()
+            .rev()
+            .filter(|d| instance_id.is_none_or(|id| d.instance_id == id))
+            .take(limit as usize)
+            .cloned()
+            .collect())
     }
 }
 

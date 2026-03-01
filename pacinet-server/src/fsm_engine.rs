@@ -1003,8 +1003,10 @@ impl FsmEngine {
                 deployed_nodes: instance.context.deployed_nodes.clone(),
             };
             let config = wh_config.clone();
+            let storage = self.storage.clone();
+            let iid = instance.instance_id.clone();
             tokio::spawn(async move {
-                webhook::deliver_webhook(&config, &payload).await;
+                webhook::deliver_webhook(&config, &payload, Some(&storage), &iid).await;
             });
         }
     }

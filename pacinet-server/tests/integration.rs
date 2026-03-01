@@ -209,6 +209,7 @@ async fn test_register_deploy_counters_flow() {
                 rate_limit: false,
                 conntrack: false,
             }),
+            dry_run: false,
         })
         .await
         .unwrap()
@@ -302,6 +303,7 @@ async fn test_deploy_to_unreachable_agent() {
             node_id: node_id.clone(),
             rules_yaml: "rules: []".to_string(),
             options: None,
+            dry_run: false,
         })
         .await
         .unwrap()
@@ -358,6 +360,7 @@ async fn test_deploy_with_pacgate_failure() {
             node_id: node_id.clone(),
             rules_yaml: "rules: []".to_string(),
             options: None,
+            dry_run: false,
         })
         .await
         .unwrap()
@@ -447,6 +450,7 @@ async fn test_batch_deploy_to_multiple_nodes() {
                 rate_limit: false,
                 conntrack: false,
             }),
+            dry_run: false,
         })
         .await
         .unwrap()
@@ -505,6 +509,7 @@ async fn test_batch_deploy_partial_failure() {
             label_filter: HashMap::from([("env".to_string(), "staging".to_string())]),
             rules_yaml: "rules: []".to_string(),
             options: None,
+            dry_run: false,
         })
         .await
         .unwrap()
