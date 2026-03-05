@@ -864,3 +864,29 @@ User identified observability as a gap in the pac* product family. Decided to cr
 ### Git Operations
 - Created repo: https://github.com/joemooney/paciview
 - Initial commit and push to GitHub
+
+---
+
+## Session 10d — Port Manager Quick Links & PaciView Metric Reconciliation (2026-03-05)
+
+### Prompt
+User asked for a central landing page for all tool web interfaces. Recommended enhancing Port Manager instead of PaciView. Also reconciled PaciView dashboards with actual metric names.
+
+### Actions Taken
+1. **Port Manager Quick Links**: Added a "Quick Links" section to Port Manager dashboard (`/home/joe/ai/port_manager/templates/index.html`) that shows clickable links to running web services. Auto-hides when no web services are running. Covers PaciNet, PaciView Grafana, AIDA, SDR Explorer, etc.
+
+2. **PaciView Metric Reconciliation**: Audited actual Prometheus metrics exported by PaciNet (14 metrics) and PacMate (28 metrics). Rewrote all 4 Grafana dashboards and alert rules to use verified metric names:
+   - **Fleet Overview**: Fixed `pacinet_nodes_active` → `pacinet_nodes_total`, replaced fictional per-node counters with real heartbeat/snapshot/FSM metrics
+   - **Counter Rates**: Replaced fictional per-rule packet counters with actual snapshot ingestion and counter condition evaluation metrics
+   - **Deploy Activity**: Used `pacinet_deploys_total{result=...}` labels, added batch deploy and webhook delivery panels
+   - **Security Events**: Mapped all panels to real PacMate metrics (incidents, alerts, honeypots, containments, playbooks, notifications, captures)
+   - **Alert Rules**: Rewritten with verified metric names and realistic thresholds
+
+### Files Modified
+- `/home/joe/ai/port_manager/templates/index.html` (quick links section)
+- `/home/joe/ai/paciview/grafana/dashboards/*.json` (all 4 dashboards)
+- `/home/joe/ai/paciview/prometheus/rules/pacinet-alerts.yml`
+
+### Git Operations
+- Port Manager: committed locally (no remote)
+- PaciView: committed and pushed to GitHub
