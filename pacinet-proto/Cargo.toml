@@ -10,3 +10,4 @@ prost-types = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
+protox = "0.7"
