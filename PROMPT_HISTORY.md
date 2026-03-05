@@ -794,3 +794,22 @@ Implement Phase 9 features: Node Annotations, Audit Logging, Policy Templates, W
 ### Git Operations
 - Committed Phase 9 changes
 - Pushed to GitHub
+
+---
+
+## Session 10 — CI Fix: Install protoc (2026-03-05)
+
+### Prompt
+Fix GitHub Actions CI failure — `protoc` binary not found during `cargo check`.
+
+### Actions Taken
+1. Added `sudo apt-get install -y protobuf-compiler` step to `.github/workflows/ci.yml`
+2. Committed and pushed fix
+3. CI now fully green: check, clippy, test, fmt all pass
+
+### Files Modified
+- `.github/workflows/ci.yml`
+
+### Git Operations
+- Committed: "Fix CI: install protoc in GitHub Actions workflow"
+- Pushed to GitHub, CI passed
