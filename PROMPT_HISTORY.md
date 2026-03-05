@@ -813,3 +813,26 @@ Fix GitHub Actions CI failure — `protoc` binary not found during `cargo check`
 ### Git Operations
 - Committed: "Fix CI: install protoc in GitHub Actions workflow"
 - Pushed to GitHub, CI passed
+
+---
+
+## Session 10b — Replace protoc with protox (2026-03-05)
+
+### Prompt
+User asked why we need protoc when prost is more popular. Clarified that prost-build shells out to protoc for parsing. Switched to protox (pure-Rust protobuf parser) to eliminate the external dependency.
+
+### Actions Taken
+1. Added `protox = "0.7"` to pacinet-proto build-dependencies
+2. Rewrote `build.rs` to use `protox::compile()` + `tonic_build::compile_fds()` instead of `compile_protos()`
+3. Removed `protoc` installation step from CI workflow (no longer needed)
+4. All 115 tests pass, clippy clean
+
+### Files Modified
+- `Cargo.toml` (workspace deps)
+- `pacinet-proto/Cargo.toml`
+- `pacinet-proto/build.rs`
+- `.github/workflows/ci.yml`
+
+### Git Operations
+- Committed: "Replace protoc with protox (pure-Rust protobuf parser)"
+- Pushed to GitHub

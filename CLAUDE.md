@@ -32,7 +32,7 @@
 - **Prometheus metrics**: operational metrics on configurable HTTP endpoint
 - **Graceful shutdown**: signal handling, connection draining, heartbeat loop cancellation
 - **Health checks**: gRPC health service via tonic-health, REST /api/health endpoint
-- **CI pipeline**: GitHub Actions (check, clippy, test, fmt)
+- **CI pipeline**: GitHub Actions (check, clippy, test, fmt); no external `protoc` dependency
 
 ## Architecture
 ```
@@ -90,7 +90,7 @@ make web-build                 # Build React app to pacinet-web/dist/
 ```
 
 ## Key Design Decisions
-- **tonic 0.12 + prost 0.13** for gRPC (matching aida/dsl4test)
+- **tonic 0.12 + prost 0.13** for gRPC; **protox 0.7** (pure-Rust) for `.proto` parsing — no external `protoc` binary needed
 - **Storage trait** (`Arc<dyn Storage>`) for backend abstraction
 - **MemoryStorage** — in-memory with RwLock (default, for dev/test)
 - **SqliteStorage** — rusqlite with WAL mode (for production persistence)
