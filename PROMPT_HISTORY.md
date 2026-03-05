@@ -836,3 +836,31 @@ User asked why we need protoc when prost is more popular. Clarified that prost-b
 ### Git Operations
 - Committed: "Replace protoc with protox (pure-Rust protobuf parser)"
 - Pushed to GitHub
+
+---
+
+## Session 10c — PaciView Scaffold (2026-03-05)
+
+### Prompt
+User identified observability as a gap in the pac* product family. Decided to create PaciView — a lightweight Prometheus + Grafana Docker Compose setup with preconfigured dashboards for PaciNet and PacMate.
+
+### Actions Taken
+1. Created `/home/joe/ai/paciview/` project with full scaffold
+2. Docker Compose with Prometheus + Grafana services
+3. 4 Grafana dashboards: Fleet Overview, Counter Rates, Deploy Activity, Security Events
+4. Prometheus alert rules for fleet health and security incidents
+5. Auto-provisioning for datasources and dashboards
+6. Standalone dashboard JSONs importable into existing Grafana setups
+7. Created GitHub repo: https://github.com/joemooney/paciview
+8. Registered ports in ~/.ports (Prometheus :9099, Grafana :3000)
+
+### New Files (in /home/joe/ai/paciview/)
+- `docker-compose.yml`, `.env`, `.gitignore`
+- `CLAUDE.md`, `README.md`
+- `prometheus/prometheus.yml`, `prometheus/rules/pacinet-alerts.yml`
+- `grafana/provisioning/datasources/datasource.yml`, `grafana/provisioning/dashboards/dashboards.yml`
+- `grafana/dashboards/fleet-overview.json`, `counter-rates.json`, `deploy-activity.json`, `security-events.json`
+
+### Git Operations
+- Created repo: https://github.com/joemooney/paciview
+- Initial commit and push to GitHub
