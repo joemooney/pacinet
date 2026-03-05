@@ -1,0 +1,24 @@
+[package]
+name = "pacinet-sim"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "pacinet-sim"
+path = "src/main.rs"
+
+[dependencies]
+pacinet-proto = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+prost-types = { workspace = true }
+async-stream = { workspace = true }
+futures-util = "0.3"

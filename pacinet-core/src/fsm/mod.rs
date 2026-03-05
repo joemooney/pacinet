@@ -66,17 +66,26 @@ mod tests {
 
     #[test]
     fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration("30s").unwrap(), std::time::Duration::from_secs(30));
+        assert_eq!(
+            parse_duration("30s").unwrap(),
+            std::time::Duration::from_secs(30)
+        );
     }
 
     #[test]
     fn test_parse_duration_minutes() {
-        assert_eq!(parse_duration("5m").unwrap(), std::time::Duration::from_secs(300));
+        assert_eq!(
+            parse_duration("5m").unwrap(),
+            std::time::Duration::from_secs(300)
+        );
     }
 
     #[test]
     fn test_parse_duration_hours() {
-        assert_eq!(parse_duration("1h").unwrap(), std::time::Duration::from_secs(3600));
+        assert_eq!(
+            parse_duration("1h").unwrap(),
+            std::time::Duration::from_secs(3600)
+        );
     }
 
     #[test]

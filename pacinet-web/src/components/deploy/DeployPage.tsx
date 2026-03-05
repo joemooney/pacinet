@@ -17,6 +17,17 @@ export default function DeployPage() {
   const [counters, setCounters] = useState(false);
   const [rateLimit, setRateLimit] = useState(false);
   const [conntrack, setConntrack] = useState(false);
+  const [axi, setAxi] = useState(false);
+  const [ports, setPorts] = useState(1);
+  const [target, setTarget] = useState('standalone');
+  const [dynamic, setDynamic] = useState(false);
+  const [dynamicEntries, setDynamicEntries] = useState(16);
+  const [width, setWidth] = useState(8);
+  const [ptp, setPtp] = useState(false);
+  const [rss, setRss] = useState(false);
+  const [rssQueues, setRssQueues] = useState(4);
+  const [intEnabled, setIntEnabled] = useState(false);
+  const [intSwitchId, setIntSwitchId] = useState(0);
 
   const { data: nodes } = useNodes();
   const deployPolicy = useDeployPolicy();
@@ -32,6 +43,17 @@ export default function DeployPage() {
         counters,
         rate_limit: rateLimit,
         conntrack,
+        axi,
+        ports,
+        target,
+        dynamic,
+        dynamic_entries: dynamicEntries,
+        width,
+        ptp,
+        rss,
+        rss_queues: rssQueues,
+        int: intEnabled,
+        int_switch_id: intSwitchId,
       });
     } else {
       if (!rulesYaml) return;
@@ -46,6 +68,17 @@ export default function DeployPage() {
         counters,
         rate_limit: rateLimit,
         conntrack,
+        axi,
+        ports,
+        target,
+        dynamic,
+        dynamic_entries: dynamicEntries,
+        width,
+        ptp,
+        rss,
+        rss_queues: rssQueues,
+        int: intEnabled,
+        int_switch_id: intSwitchId,
       });
     }
   };
@@ -58,6 +91,17 @@ export default function DeployPage() {
         counters,
         rate_limit: rateLimit,
         conntrack,
+        axi,
+        ports,
+        target,
+        dynamic,
+        dynamic_entries: dynamicEntries,
+        width,
+        ptp,
+        rss,
+        rss_queues: rssQueues,
+        int: intEnabled,
+        int_switch_id: intSwitchId,
       });
     }
   };
@@ -146,6 +190,96 @@ export default function DeployPage() {
           <label className="flex items-center gap-2 text-sm text-content-secondary">
             <input type="checkbox" checked={conntrack} onChange={(e) => setConntrack(e.target.checked)} className="accent-accent" />
             Conntrack
+          </label>
+          <label className="flex items-center gap-2 text-sm text-content-secondary">
+            <input type="checkbox" checked={axi} onChange={(e) => setAxi(e.target.checked)} className="accent-accent" />
+            AXI
+          </label>
+          <label className="flex items-center gap-2 text-sm text-content-secondary">
+            <input type="checkbox" checked={dynamic} onChange={(e) => setDynamic(e.target.checked)} className="accent-accent" />
+            Dynamic
+          </label>
+          <label className="flex items-center gap-2 text-sm text-content-secondary">
+            <input type="checkbox" checked={ptp} onChange={(e) => setPtp(e.target.checked)} className="accent-accent" />
+            PTP
+          </label>
+          <label className="flex items-center gap-2 text-sm text-content-secondary">
+            <input type="checkbox" checked={rss} onChange={(e) => setRss(e.target.checked)} className="accent-accent" />
+            RSS
+          </label>
+          <label className="flex items-center gap-2 text-sm text-content-secondary">
+            <input type="checkbox" checked={intEnabled} onChange={(e) => setIntEnabled(e.target.checked)} className="accent-accent" />
+            INT
+          </label>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+          <label className="text-sm text-content-secondary">
+            <div className="text-xs text-content-muted mb-1">Ports</div>
+            <input
+              type="number"
+              min={1}
+              max={256}
+              value={ports}
+              onChange={(e) => setPorts(Math.max(1, Number(e.target.value) || 1))}
+              className="w-full px-3 py-2 bg-surface border border-edge rounded-lg text-sm text-content"
+            />
+          </label>
+          <label className="text-sm text-content-secondary">
+            <div className="text-xs text-content-muted mb-1">Target</div>
+            <select
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              className="w-full px-3 py-2 bg-surface border border-edge rounded-lg text-sm text-content"
+            >
+              <option value="standalone">standalone</option>
+              <option value="opennic">opennic</option>
+              <option value="corundum">corundum</option>
+            </select>
+          </label>
+          <label className="text-sm text-content-secondary">
+            <div className="text-xs text-content-muted mb-1">Dynamic Entries</div>
+            <input
+              type="number"
+              min={1}
+              max={256}
+              value={dynamicEntries}
+              onChange={(e) => setDynamicEntries(Math.max(1, Number(e.target.value) || 1))}
+              className="w-full px-3 py-2 bg-surface border border-edge rounded-lg text-sm text-content"
+            />
+          </label>
+          <label className="text-sm text-content-secondary">
+            <div className="text-xs text-content-muted mb-1">Width (bits)</div>
+            <input
+              type="number"
+              min={8}
+              step={8}
+              value={width}
+              onChange={(e) => setWidth(Math.max(8, Number(e.target.value) || 8))}
+              className="w-full px-3 py-2 bg-surface border border-edge rounded-lg text-sm text-content"
+            />
+          </label>
+          <label className="text-sm text-content-secondary">
+            <div className="text-xs text-content-muted mb-1">RSS Queues</div>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              value={rssQueues}
+              onChange={(e) => setRssQueues(Math.min(16, Math.max(1, Number(e.target.value) || 1)))}
+              className="w-full px-3 py-2 bg-surface border border-edge rounded-lg text-sm text-content"
+            />
+          </label>
+          <label className="text-sm text-content-secondary">
+            <div className="text-xs text-content-muted mb-1">INT Switch ID</div>
+            <input
+              type="number"
+              min={0}
+              max={65535}
+              value={intSwitchId}
+              onChange={(e) => setIntSwitchId(Math.min(65535, Math.max(0, Number(e.target.value) || 0)))}
+              className="w-full px-3 py-2 bg-surface border border-edge rounded-lg text-sm text-content"
+            />
           </label>
         </div>
 

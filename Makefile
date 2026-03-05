@@ -1,4 +1,4 @@
-.PHONY: build check test clean fmt clippy run-server run-server-sqlite run-server-tls run-agent run-agent-tls node-list status integration-test rest-test test-all gen-certs web-install web-dev web-build run-server-web run-server-auth run-server-ha
+.PHONY: build check test clean fmt clippy run-server run-server-sqlite run-server-tls run-agent run-agent-tls run-sim node-list status integration-test rest-test test-all gen-certs web-install web-dev web-build run-server-web run-server-auth run-server-ha
 
 build:
 	cargo build
@@ -35,6 +35,9 @@ run-agent:
 run-agent-tls:
 	cargo run -p pacinet-agent -- --controller https://127.0.0.1:50054 \
 		--ca-cert certs/ca.pem --tls-cert certs/agent.pem --tls-key certs/agent-key.pem
+
+run-sim:
+	cargo run -p pacinet-sim -- --pacinet-grpc http://127.0.0.1:50054 --pacinet-rest http://127.0.0.1:8081
 
 gen-certs:
 	bash scripts/gen-certs.sh

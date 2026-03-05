@@ -469,9 +469,7 @@ async fn main() -> Result<()> {
         Commands::Status { label } => {
             handle_status(&cli.server, label, cli.json, &tls_config).await?
         }
-        Commands::Fsm { action } => {
-            handle_fsm(action, &cli.server, cli.json, &tls_config).await?
-        }
+        Commands::Fsm { action } => handle_fsm(action, &cli.server, cli.json, &tls_config).await?,
         Commands::Watch { action } => {
             handle_watch(action, &cli.server, cli.json, &tls_config).await?
         }
@@ -480,7 +478,15 @@ async fn main() -> Result<()> {
             resource_type,
             limit,
         } => {
-            handle_audit(&cli.server, action, resource_type, limit, cli.json, &tls_config).await?
+            handle_audit(
+                &cli.server,
+                action,
+                resource_type,
+                limit,
+                cli.json,
+                &tls_config,
+            )
+            .await?
         }
         Commands::Template { action } => {
             handle_template(action, &cli.server, cli.json, &tls_config).await?
@@ -668,6 +674,17 @@ async fn handle_deploy(
         counters,
         rate_limit,
         conntrack,
+        axi: false,
+        ports: 1,
+        target: "standalone".to_string(),
+        dynamic: false,
+        dynamic_entries: 16,
+        width: 8,
+        ptp: false,
+        rss: false,
+        rss_queues: 4,
+        int_enabled: false,
+        int_switch_id: 0,
     });
 
     if let Some(nid) = node_id {
@@ -693,7 +710,10 @@ async fn handle_deploy(
                     }
                 }
                 if !dr.target_nodes.is_empty() {
-                    println!("\n  {:<38} {:<15} {:<16} {:<16} CHANGED", "NODE ID", "HOSTNAME", "CURRENT HASH", "NEW HASH");
+                    println!(
+                        "\n  {:<38} {:<15} {:<16} {:<16} CHANGED",
+                        "NODE ID", "HOSTNAME", "CURRENT HASH", "NEW HASH"
+                    );
                     for n in &dr.target_nodes {
                         let cur = if n.current_policy_hash.is_empty() {
                             "-".to_string()
@@ -708,7 +728,10 @@ async fn handle_deploy(
                             n.new_policy_hash.clone()
                         };
                         let changed = if n.policy_changed { "yes" } else { "no" };
-                        println!("  {:<38} {:<15} {:<16} {:<16} {}", n.node_id, n.hostname, cur, new_h, changed);
+                        println!(
+                            "  {:<38} {:<15} {:<16} {:<16} {}",
+                            n.node_id, n.hostname, cur, new_h, changed
+                        );
                     }
                 }
             } else {
@@ -1186,9 +1209,7 @@ async fn handle_fsm(
         }
         FsmCommands::Show { name } => {
             let response = client
-                .get_fsm_definition(pacinet_proto::GetFsmDefinitionRequest {
-                    name: name.clone(),
-                })
+                .get_fsm_definition(pacinet_proto::GetFsmDefinitionRequest { name: name.clone() })
                 .await?
                 .into_inner();
 
@@ -1246,6 +1267,17 @@ async fn handle_fsm(
                         counters,
                         rate_limit,
                         conntrack,
+                        axi: false,
+                        ports: 1,
+                        target: "standalone".to_string(),
+                        dynamic: false,
+                        dynamic_entries: 16,
+                        width: 8,
+                        ptp: false,
+                        rss: false,
+                        rss_queues: 4,
+                        int_enabled: false,
+                        int_switch_id: 0,
                     }),
                     target_label_filter,
                 })
@@ -1291,7 +1323,10 @@ async fn handle_fsm(
                                 })
                                 .unwrap_or_else(|| "?".to_string());
                             if t.from_state.is_empty() {
-                                println!("  {} -> {} [{}] {}", time, t.to_state, t.trigger, t.message);
+                                println!(
+                                    "  {} -> {} [{}] {}",
+                                    time, t.to_state, t.trigger, t.message
+                                );
                             } else {
                                 println!(
                                     "  {} {} -> {} [{}] {}",
@@ -1305,10 +1340,7 @@ async fn handle_fsm(
                 eprintln!("Instance {} not found", instance_id);
             }
         }
-        FsmCommands::Instances {
-            definition,
-            status,
-        } => {
+        FsmCommands::Instances { definition, status } => {
             let response = client
                 .list_fsm_instances(pacinet_proto::ListFsmInstancesRequest {
                     definition_name: definition.unwrap_or_default(),
@@ -1318,11 +1350,7 @@ async fn handle_fsm(
                 .into_inner();
 
             if as_json {
-                let instances: Vec<_> = response
-                    .instances
-                    .iter()
-                    .map(instance_to_json)
-                    .collect();
+                let instances: Vec<_> = response.instances.iter().map(instance_to_json).collect();
                 println!("{}", serde_json::to_string_pretty(&instances)?);
             } else if response.instances.is_empty() {
                 println!("No FSM instances");
@@ -1344,10 +1372,7 @@ async fn handle_fsm(
                 }
             }
         }
-        FsmCommands::Advance {
-            instance_id,
-            state,
-        } => {
+        FsmCommands::Advance { instance_id, state } => {
             let response = client
                 .advance_fsm(pacinet_proto::AdvanceFsmRequest {
                     instance_id: instance_id.clone(),
@@ -1357,10 +1382,7 @@ async fn handle_fsm(
                 .into_inner();
 
             if response.success {
-                println!(
-                    "FSM advanced to state: {}",
-                    response.current_state
-                );
+                println!("FSM advanced to state: {}", response.current_state);
             } else {
                 eprintln!("Failed: {}", response.message);
             }
@@ -1434,10 +1456,8 @@ async fn handle_watch(
                         &event.instance_id
                     };
 
-                    let event_type =
-                        pacinet_proto::FsmEventType::try_from(event.event_type).unwrap_or(
-                            pacinet_proto::FsmEventType::FsmEventUnspecified,
-                        );
+                    let event_type = pacinet_proto::FsmEventType::try_from(event.event_type)
+                        .unwrap_or(pacinet_proto::FsmEventType::FsmEventUnspecified);
                     match event_type {
                         pacinet_proto::FsmEventType::FsmEventTransition => {
                             println!(
@@ -1560,16 +1580,11 @@ async fn handle_watch(
                         &event.node_id
                     };
 
-                    let event_type =
-                        pacinet_proto::NodeEventType::try_from(event.event_type).unwrap_or(
-                            pacinet_proto::NodeEventType::NodeEventUnspecified,
-                        );
+                    let event_type = pacinet_proto::NodeEventType::try_from(event.event_type)
+                        .unwrap_or(pacinet_proto::NodeEventType::NodeEventUnspecified);
                     match event_type {
                         pacinet_proto::NodeEventType::NodeEventRegistered => {
-                            println!(
-                                "{} + {} ({}) registered",
-                                time, id_short, event.hostname,
-                            );
+                            println!("{} + {} ({}) registered", time, id_short, event.hostname,);
                         }
                         pacinet_proto::NodeEventType::NodeEventStateChanged => {
                             let old = state_name(event.old_state);
@@ -1586,16 +1601,10 @@ async fn handle_watch(
                             );
                         }
                         pacinet_proto::NodeEventType::NodeEventRemoved => {
-                            println!(
-                                "{} - {} ({}) removed",
-                                time, id_short, event.hostname,
-                            );
+                            println!("{} - {} ({}) removed", time, id_short, event.hostname,);
                         }
                         _ => {
-                            println!(
-                                "{} ? {} ({}) unknown event",
-                                time, id_short, event.hostname,
-                            );
+                            println!("{} ? {} ({}) unknown event", time, id_short, event.hostname,);
                         }
                     }
                 }
@@ -1741,10 +1750,7 @@ async fn handle_template(
             } else if response.templates.is_empty() {
                 println!("No templates found");
             } else {
-                println!(
-                    "{:<25} {:<30} TAGS",
-                    "NAME", "DESCRIPTION"
-                );
+                println!("{:<25} {:<30} TAGS", "NAME", "DESCRIPTION");
                 for t in &response.templates {
                     let tags_str = t.tags.join(", ");
                     let desc = if t.description.len() > 28 {
@@ -1758,9 +1764,7 @@ async fn handle_template(
         }
         TemplateCommands::Show { name } => {
             let response = client
-                .get_policy_template(pacinet_proto::GetPolicyTemplateRequest {
-                    name: name.clone(),
-                })
+                .get_policy_template(pacinet_proto::GetPolicyTemplateRequest { name: name.clone() })
                 .await?
                 .into_inner();
 
@@ -1806,9 +1810,7 @@ async fn handle_template(
         } => {
             // Fetch template first
             let template = client
-                .get_policy_template(pacinet_proto::GetPolicyTemplateRequest {
-                    name: name.clone(),
-                })
+                .get_policy_template(pacinet_proto::GetPolicyTemplateRequest { name: name.clone() })
                 .await?
                 .into_inner();
 
@@ -1826,6 +1828,17 @@ async fn handle_template(
                         counters,
                         rate_limit: false,
                         conntrack: false,
+                        axi: false,
+                        ports: 1,
+                        target: "standalone".to_string(),
+                        dynamic: false,
+                        dynamic_entries: 16,
+                        width: 8,
+                        ptp: false,
+                        rss: false,
+                        rss_queues: 4,
+                        int_enabled: false,
+                        int_switch_id: 0,
                     }),
                     dry_run,
                 })
@@ -1840,7 +1853,11 @@ async fn handle_template(
                         println!("    - {}", e);
                     }
                     for n in &dr.target_nodes {
-                        let changed = if n.policy_changed { "changed" } else { "unchanged" };
+                        let changed = if n.policy_changed {
+                            "changed"
+                        } else {
+                            "unchanged"
+                        };
                         println!("  {} ({}): {}", n.node_id, n.hostname, changed);
                     }
                 } else {

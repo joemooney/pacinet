@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNodeEvents, useCounterEvents, useFsmEvents, useEventHistory } from '../../hooks/useEvents';
+import { useFilterPresets } from '../../hooks/useFilterPresets';
 import { formatTimestamp } from '../../lib/utils';
 import Badge from '../ui/Badge';
+import FilterPresetManager from '../ui/FilterPresetManager';
 
 type EventType = 'nodes' | 'counters' | 'fsm';
 type UnifiedEvent = {
@@ -12,6 +14,15 @@ type UnifiedEvent = {
 };
 
 type Tab = 'live' | 'history';
+
+interface WatchPreset {
+  tab: Tab;
+  filters: Record<EventType, boolean>;
+  textFilter: string;
+  historyType: string;
+  historySource: string;
+  historyLimit: number;
+}
 
 export default function WatchPage() {
   const [tab, setTab] = useState<Tab>('live');
@@ -24,10 +35,26 @@ export default function WatchPage() {
   const [paused, setPaused] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
 
-  // History filters
   const [historyType, setHistoryType] = useState('');
   const [historySource, setHistorySource] = useState('');
   const [historyLimit, setHistoryLimit] = useState(50);
+
+  const presets = useFilterPresets<WatchPreset>(
+    'pacinet_filters_watch',
+    { tab, filters, textFilter, historyType, historySource, historyLimit },
+    (preset) => {
+      setTab(preset.tab === 'history' ? 'history' : 'live');
+      setFilters({
+        nodes: Boolean(preset.filters?.nodes),
+        counters: Boolean(preset.filters?.counters),
+        fsm: Boolean(preset.filters?.fsm),
+      });
+      setTextFilter(preset.textFilter ?? '');
+      setHistoryType(preset.historyType ?? '');
+      setHistorySource(preset.historySource ?? '');
+      setHistoryLimit([25, 50, 100, 200].includes(preset.historyLimit) ? preset.historyLimit : 50);
+    }
+  );
 
   const nodeEvents = useNodeEvents();
   const counterEvents = useCounterEvents();
@@ -38,7 +65,6 @@ export default function WatchPage() {
     limit: historyLimit,
   });
 
-  // Combine and sort live events
   const unified: UnifiedEvent[] = [];
 
   if (filters.nodes) {
@@ -105,29 +131,31 @@ export default function WatchPage() {
 
   return (
     <div className="h-full flex flex-col animate-fade-in">
-      {/* Tab toggle */}
-      <div className="flex items-center gap-2 mb-4">
-        <button
-          onClick={() => setTab('live')}
-          className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-            tab === 'live' ? 'bg-accent text-white' : 'text-content-secondary hover:text-content hover:bg-surface-hover'
-          }`}
-        >
-          Live
-        </button>
-        <button
-          onClick={() => setTab('history')}
-          className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-            tab === 'history' ? 'bg-accent text-white' : 'text-content-secondary hover:text-content hover:bg-surface-hover'
-          }`}
-        >
-          History
-        </button>
+      <div className="flex flex-col gap-2 mb-4">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setTab('live')}
+            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              tab === 'live' ? 'bg-accent text-white' : 'text-content-secondary hover:text-content hover:bg-surface-hover'
+            }`}
+          >
+            Live
+          </button>
+          <button
+            onClick={() => setTab('history')}
+            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              tab === 'history' ? 'bg-accent text-white' : 'text-content-secondary hover:text-content hover:bg-surface-hover'
+            }`}
+          >
+            History
+          </button>
+        </div>
+
+        <FilterPresetManager manager={presets} exportFilePrefix="pacinet-watch-filters" />
       </div>
 
       {tab === 'live' ? (
         <>
-          {/* Live filters */}
           <div className="flex items-center gap-4 mb-4 flex-shrink-0">
             {(['nodes', 'counters', 'fsm'] as EventType[]).map((type) => (
               <label key={type} className="flex items-center gap-2 text-sm text-content-secondary">
@@ -150,7 +178,6 @@ export default function WatchPage() {
             <span className="text-xs text-content-muted ml-auto">{filtered.length} events</span>
           </div>
 
-          {/* Live event feed */}
           <div
             ref={feedRef}
             className="flex-1 overflow-y-auto bg-surface-alt border border-edge rounded-xl"
@@ -187,7 +214,6 @@ export default function WatchPage() {
         </>
       ) : (
         <>
-          {/* History filters */}
           <div className="flex items-center gap-4 mb-4 flex-shrink-0">
             <div>
               <label className="block text-xs text-content-muted mb-1">Event Type</label>
@@ -234,7 +260,6 @@ export default function WatchPage() {
             <span className="text-xs text-content-muted ml-auto mt-4">{historyEvents.length} events</span>
           </div>
 
-          {/* History feed */}
           <div className="flex-1 overflow-y-auto bg-surface-alt border border-edge rounded-xl">
             {historyLoading ? (
               <div className="text-sm text-content-muted py-8 text-center">Loading...</div>

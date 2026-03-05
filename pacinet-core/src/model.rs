@@ -96,6 +96,8 @@ pub struct Node {
     pub hostname: String,
     pub agent_address: String,
     pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub capabilities: HashMap<String, String>,
     pub state: NodeState,
     pub registered_at: DateTime<Utc>,
     pub last_heartbeat: DateTime<Utc>,
@@ -118,6 +120,7 @@ impl Node {
             hostname,
             agent_address,
             labels,
+            capabilities: HashMap::new(),
             state: NodeState::Registered,
             registered_at: now,
             last_heartbeat: now,
@@ -138,6 +141,17 @@ pub struct Policy {
     pub counters_enabled: bool,
     pub rate_limit_enabled: bool,
     pub conntrack_enabled: bool,
+    pub axi_enabled: bool,
+    pub ports: u32,
+    pub target: String,
+    pub dynamic: bool,
+    pub dynamic_entries: u32,
+    pub width: u32,
+    pub ptp: bool,
+    pub rss: bool,
+    pub rss_queues: u32,
+    pub int: bool,
+    pub int_switch_id: u32,
 }
 
 /// Versioned snapshot of a policy deployment
@@ -151,6 +165,17 @@ pub struct PolicyVersion {
     pub counters_enabled: bool,
     pub rate_limit_enabled: bool,
     pub conntrack_enabled: bool,
+    pub axi_enabled: bool,
+    pub ports: u32,
+    pub target: String,
+    pub dynamic: bool,
+    pub dynamic_entries: u32,
+    pub width: u32,
+    pub ptp: bool,
+    pub rss: bool,
+    pub rss_queues: u32,
+    pub int: bool,
+    pub int_switch_id: u32,
 }
 
 /// Result of a deployment attempt
@@ -205,6 +230,15 @@ pub struct RuleCounter {
     pub rule_name: String,
     pub match_count: u64,
     pub byte_count: u64,
+}
+
+/// Per-flow counter data from connection tracking export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowCounter {
+    pub flow_key: String,
+    pub packet_count: u64,
+    pub byte_count: u64,
+    pub state: String,
 }
 
 /// Timestamped snapshot of counters from a node.
@@ -279,6 +313,28 @@ impl From<RuleCounter> for pacinet_proto::RuleCounter {
             rule_name: counter.rule_name,
             match_count: counter.match_count,
             byte_count: counter.byte_count,
+        }
+    }
+}
+
+impl From<pacinet_proto::FlowCounter> for FlowCounter {
+    fn from(proto: pacinet_proto::FlowCounter) -> Self {
+        Self {
+            flow_key: proto.flow_key,
+            packet_count: proto.packet_count,
+            byte_count: proto.byte_count,
+            state: proto.state,
+        }
+    }
+}
+
+impl From<FlowCounter> for pacinet_proto::FlowCounter {
+    fn from(counter: FlowCounter) -> Self {
+        pacinet_proto::FlowCounter {
+            flow_key: counter.flow_key,
+            packet_count: counter.packet_count,
+            byte_count: counter.byte_count,
+            state: counter.state,
         }
     }
 }

@@ -29,16 +29,16 @@ export default function StatusChart({ nodesByState, total }: StatusChartProps) {
   }
 
   return (
-    <div className="flex items-center gap-6">
-      <div className="w-28 h-28 flex-shrink-0">
+    <div className="flex flex-col sm:flex-row sm:items-center gap-6">
+      <div className="w-36 h-36 flex-shrink-0 mx-auto sm:mx-0">
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Pie
               data={data}
               cx="50%"
               cy="50%"
-              innerRadius={28}
-              outerRadius={52}
+              innerRadius={36}
+              outerRadius={64}
               dataKey="value"
               isAnimationActive={false}
             >
@@ -47,21 +47,27 @@ export default function StatusChart({ nodesByState, total }: StatusChartProps) {
               ))}
             </Pie>
             <Tooltip
-              contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', fontSize: 12 }}
+              contentStyle={{
+                backgroundColor: 'var(--bg-secondary)',
+                border: '1px solid var(--border-default)',
+                borderRadius: '10px',
+                fontSize: 12,
+                color: 'var(--text-primary)',
+              }}
               formatter={(value, name) => [`${value} node${value !== 1 ? 's' : ''}`, String(name)]}
             />
           </PieChart>
         </ResponsiveContainer>
       </div>
-      <div className="flex flex-col gap-1.5">
+      <div className="flex-1 flex flex-col gap-2">
         {data.map((entry) => (
-          <div key={entry.name} className="flex items-center gap-2 text-sm">
+          <div key={entry.name} className="flex items-center gap-2 text-sm rounded-lg px-2 py-1.5 hover:bg-surface-hover/70 transition-colors">
             <div
               className="w-2.5 h-2.5 rounded-full"
               style={{ backgroundColor: entry.color }}
             />
             <span className="text-content-secondary capitalize">{entry.name}</span>
-            <span className="text-content font-medium">{entry.value}</span>
+            <span className="text-content font-semibold ml-auto">{entry.value}</span>
           </div>
         ))}
       </div>

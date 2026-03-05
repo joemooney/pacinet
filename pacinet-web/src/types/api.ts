@@ -11,6 +11,7 @@ export interface NodeJson {
   uptime_seconds: number;
   policy_hash: string;
   last_heartbeat_age_seconds: number;
+  capabilities: Record<string, string>;
 }
 
 export interface PolicyJson {
@@ -21,12 +22,36 @@ export interface PolicyJson {
   counters_enabled: boolean;
   rate_limit_enabled: boolean;
   conntrack_enabled: boolean;
+  axi_enabled: boolean;
+  ports: number;
+  target: string;
+  dynamic: boolean;
+  dynamic_entries: number;
+  width: number;
+  ptp: boolean;
+  rss: boolean;
+  rss_queues: number;
+  int: boolean;
+  int_switch_id: number;
 }
 
 export interface RuleCounterJson {
   rule_name: string;
   match_count: number;
   byte_count: number;
+}
+
+export interface FlowCounterJson {
+  flow_key: string;
+  packet_count: number;
+  byte_count: number;
+  state: string;
+}
+
+export interface FlowCounterSetJson {
+  node_id: string;
+  flow_counters: FlowCounterJson[];
+  collected_at: string;
 }
 
 export interface CounterJson {
@@ -41,6 +66,20 @@ export interface PolicyVersionJson {
   rules_yaml: string;
   policy_hash: string;
   deployed_at: string;
+  counters_enabled: boolean;
+  rate_limit_enabled: boolean;
+  conntrack_enabled: boolean;
+  axi_enabled: boolean;
+  ports: number;
+  target: string;
+  dynamic: boolean;
+  dynamic_entries: number;
+  width: number;
+  ptp: boolean;
+  rss: boolean;
+  rss_queues: number;
+  int: boolean;
+  int_switch_id: number;
 }
 
 export interface DeploymentJson {

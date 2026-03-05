@@ -6,13 +6,13 @@ interface CardProps {
 
 export default function Card({ children, className = '', title }: CardProps) {
   return (
-    <div className={`bg-surface-alt border border-edge rounded-xl ${className}`}>
+    <div className={`rounded-2xl border border-edge/90 bg-surface-alt/90 shadow-[0_10px_30px_rgba(0,0,0,0.18)] backdrop-blur-sm ${className}`}>
       {title && (
-        <div className="px-4 py-3 border-b border-edge">
-          <h3 className="text-sm font-medium text-content-secondary">{title}</h3>
+        <div className="px-5 py-4 border-b border-edge/80">
+          <h3 className="text-sm font-semibold tracking-wide text-content-secondary">{title}</h3>
         </div>
       )}
-      <div className="p-4">{children}</div>
+      <div className="p-5">{children}</div>
     </div>
   );
 }

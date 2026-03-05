@@ -80,26 +80,25 @@ impl FsmEngine {
 
         for instance in instances {
             let def_name = instance.definition_name.clone();
-            let definition = match blocking(&self.storage, move |s| s.get_fsm_definition(&def_name))
-                .await
-            {
-                Ok(Some(def)) => def,
-                Ok(None) => {
-                    warn!(
-                        instance_id = %instance.instance_id,
-                        "FSM definition '{}' not found, marking failed",
-                        instance.definition_name
-                    );
-                    let mut inst = instance;
-                    inst.status = FsmInstanceStatus::Failed;
-                    let _ = blocking(&self.storage, move |s| s.update_fsm_instance(inst)).await;
-                    continue;
-                }
-                Err(e) => {
-                    warn!("FSM engine: failed to load definition: {}", e);
-                    continue;
-                }
-            };
+            let definition =
+                match blocking(&self.storage, move |s| s.get_fsm_definition(&def_name)).await {
+                    Ok(Some(def)) => def,
+                    Ok(None) => {
+                        warn!(
+                            instance_id = %instance.instance_id,
+                            "FSM definition '{}' not found, marking failed",
+                            instance.definition_name
+                        );
+                        let mut inst = instance;
+                        inst.status = FsmInstanceStatus::Failed;
+                        let _ = blocking(&self.storage, move |s| s.update_fsm_instance(inst)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("FSM engine: failed to load definition: {}", e);
+                        continue;
+                    }
+                };
 
             if let Err(e) = self.evaluate_instance(instance, &definition).await {
                 warn!("FSM engine: evaluation error: {}", e);
@@ -131,9 +130,7 @@ impl FsmEngine {
             .await
             .map_err(|e| pacinet_core::PaciNetError::Internal(e.to_string()))?
             .ok_or_else(|| {
-                pacinet_core::PaciNetError::Fsm(FsmError::DefinitionNotFound(
-                    def_name.to_string(),
-                ))
+                pacinet_core::PaciNetError::Fsm(FsmError::DefinitionNotFound(def_name.to_string()))
             })?;
 
         let context = FsmContext::for_deployment(rules_yaml, compile_options);
@@ -175,9 +172,7 @@ impl FsmEngine {
             .await
             .map_err(|e| pacinet_core::PaciNetError::Internal(e.to_string()))?
             .ok_or_else(|| {
-                pacinet_core::PaciNetError::Fsm(FsmError::DefinitionNotFound(
-                    def_name.to_string(),
-                ))
+                pacinet_core::PaciNetError::Fsm(FsmError::DefinitionNotFound(def_name.to_string()))
             })?;
 
         // Select target nodes by label
@@ -234,9 +229,7 @@ impl FsmEngine {
             .await
             .map_err(|e| pacinet_core::PaciNetError::Internal(e.to_string()))?
             .ok_or_else(|| {
-                pacinet_core::PaciNetError::Fsm(FsmError::InstanceNotFound(
-                    instance_id.to_string(),
-                ))
+                pacinet_core::PaciNetError::Fsm(FsmError::InstanceNotFound(instance_id.to_string()))
             })?;
 
         if !instance.is_running() {
@@ -253,14 +246,15 @@ impl FsmEngine {
                 ))
             })?;
 
-        let current_state_def = definition
-            .states
-            .get(&instance.current_state)
-            .ok_or_else(|| {
-                pacinet_core::PaciNetError::Fsm(FsmError::InvalidState(
-                    instance.current_state.clone(),
-                ))
-            })?;
+        let current_state_def =
+            definition
+                .states
+                .get(&instance.current_state)
+                .ok_or_else(|| {
+                    pacinet_core::PaciNetError::Fsm(FsmError::InvalidState(
+                        instance.current_state.clone(),
+                    ))
+                })?;
 
         // Find target: explicit target_state or first transition with manual condition
         let to_state = if let Some(ref target) = target_state {
@@ -301,8 +295,13 @@ impl FsmEngine {
                 })?
         };
 
-        self.fire_transition(&mut instance, &to_state, TransitionTrigger::Manual, &definition)
-            .await;
+        self.fire_transition(
+            &mut instance,
+            &to_state,
+            TransitionTrigger::Manual,
+            &definition,
+        )
+        .await;
 
         let inst_clone = instance.clone();
         blocking(&self.storage, move |s| s.update_fsm_instance(inst_clone))
@@ -324,9 +323,7 @@ impl FsmEngine {
             .await
             .map_err(|e| pacinet_core::PaciNetError::Internal(e.to_string()))?
             .ok_or_else(|| {
-                pacinet_core::PaciNetError::Fsm(FsmError::InstanceNotFound(
-                    instance_id.to_string(),
-                ))
+                pacinet_core::PaciNetError::Fsm(FsmError::InstanceNotFound(instance_id.to_string()))
             })?;
 
         if !instance.is_running() {
@@ -389,8 +386,7 @@ impl FsmEngine {
             if instance.is_running() {
                 instance.status = FsmInstanceStatus::Completed;
                 instance.updated_at = chrono::Utc::now();
-                let _ =
-                    blocking(&self.storage, move |s| s.update_fsm_instance(instance)).await;
+                let _ = blocking(&self.storage, move |s| s.update_fsm_instance(instance)).await;
                 m::record_fsm_instance_status("completed");
             }
             return Ok(());
@@ -424,8 +420,7 @@ impl FsmEngine {
                     .await;
 
                 let inst_clone = instance.clone();
-                let _ = blocking(&self.storage, move |s| s.update_fsm_instance(inst_clone))
-                    .await;
+                let _ = blocking(&self.storage, move |s| s.update_fsm_instance(inst_clone)).await;
 
                 m::record_fsm_transition();
                 return Ok(());
@@ -468,18 +463,14 @@ impl FsmEngine {
             }
             ConditionDefinition::Compound(compound) => {
                 if let Some(ref conditions) = compound.and {
-                    return conditions
-                        .iter()
-                        .all(|c: &ConditionDefinition| {
-                            self.evaluate_condition(c, instance, current_state, transition_idx)
-                        });
+                    return conditions.iter().all(|c: &ConditionDefinition| {
+                        self.evaluate_condition(c, instance, current_state, transition_idx)
+                    });
                 }
                 if let Some(ref conditions) = compound.or {
-                    return conditions
-                        .iter()
-                        .any(|c: &ConditionDefinition| {
-                            self.evaluate_condition(c, instance, current_state, transition_idx)
-                        });
+                    return conditions.iter().any(|c: &ConditionDefinition| {
+                        self.evaluate_condition(c, instance, current_state, transition_idx)
+                    });
                 }
                 if let Some(ref inner) = compound.not {
                     return !self.evaluate_condition(
@@ -582,8 +573,8 @@ impl FsmEngine {
                 .or_insert(now);
 
             let elapsed = now - *first_true;
-            let required = chrono::Duration::from_std(required_duration)
-                .unwrap_or(chrono::Duration::MAX);
+            let required =
+                chrono::Duration::from_std(required_duration).unwrap_or(chrono::Duration::MAX);
 
             if elapsed < required {
                 debug!(
@@ -679,8 +670,12 @@ impl FsmEngine {
         }
 
         match aggregate {
-            AggregateMode::Any => rates.iter().any(|r| rate_matches(*r, rate_above, rate_below)),
-            AggregateMode::All => rates.iter().all(|r| rate_matches(*r, rate_above, rate_below)),
+            AggregateMode::Any => rates
+                .iter()
+                .any(|r| rate_matches(*r, rate_above, rate_below)),
+            AggregateMode::All => rates
+                .iter()
+                .all(|r| rate_matches(*r, rate_above, rate_below)),
             AggregateMode::Sum => {
                 let sum: f64 = rates.iter().sum();
                 rate_matches(sum, rate_above, rate_below)
@@ -695,10 +690,7 @@ impl FsmEngine {
         trigger: TransitionTrigger,
         definition: &FsmDefinition,
     ) {
-        let message = format!(
-            "{} -> {} ({})",
-            instance.current_state, to_state, trigger
-        );
+        let message = format!("{} -> {} ({})", instance.current_state, to_state, trigger);
         info!(
             instance_id = %instance.instance_id,
             from = %instance.current_state,
@@ -754,11 +746,7 @@ impl FsmEngine {
         }
     }
 
-    async fn execute_action(
-        &self,
-        action: &ActionDefinition,
-        instance: &mut FsmInstance,
-    ) {
+    async fn execute_action(&self, action: &ActionDefinition, instance: &mut FsmInstance) {
         if let Some(ref deploy_action) = action.deploy {
             self.execute_deploy(deploy_action, instance).await;
         } else if let Some(ref rollback_action) = action.rollback {
@@ -768,11 +756,7 @@ impl FsmEngine {
         }
     }
 
-    async fn execute_deploy(
-        &self,
-        deploy_action: &DeployAction,
-        instance: &mut FsmInstance,
-    ) {
+    async fn execute_deploy(&self, deploy_action: &DeployAction, instance: &mut FsmInstance) {
         let rules_yaml = match &instance.context.rules_yaml {
             Some(yaml) => yaml.clone(),
             None => {
@@ -849,6 +833,17 @@ impl FsmEngine {
                 counters: o.counters,
                 rate_limit: o.rate_limit,
                 conntrack: o.conntrack,
+                axi: o.axi,
+                ports: o.ports,
+                target: o.target.clone(),
+                dynamic: o.dynamic,
+                dynamic_entries: o.dynamic_entries,
+                width: o.width,
+                ptp: o.ptp,
+                rss: o.rss,
+                rss_queues: o.rss_queues,
+                int_enabled: o.int,
+                int_switch_id: o.int_switch_id,
             })
             .unwrap_or_default();
 
@@ -905,21 +900,20 @@ impl FsmEngine {
 
         for node_id in &deployed_nodes {
             let nid = node_id.clone();
-            let versions = match blocking(&self.storage, move |s| s.get_policy_history(&nid, 2))
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("FSM rollback: failed to get history for {}: {}", node_id, e);
-                    failed += 1;
-                    node_results.push(NodeActionResult {
-                        node_id: node_id.clone(),
-                        success: false,
-                        message: format!("Failed to get policy history: {}", e),
-                    });
-                    continue;
-                }
-            };
+            let versions =
+                match blocking(&self.storage, move |s| s.get_policy_history(&nid, 2)).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("FSM rollback: failed to get history for {}: {}", node_id, e);
+                        failed += 1;
+                        node_results.push(NodeActionResult {
+                            node_id: node_id.clone(),
+                            success: false,
+                            message: format!("Failed to get policy history: {}", e),
+                        });
+                        continue;
+                    }
+                };
 
             if versions.len() < 2 {
                 warn!("FSM rollback: no previous version for node {}", node_id);
@@ -951,6 +945,17 @@ impl FsmEngine {
                 counters: prev.counters_enabled,
                 rate_limit: prev.rate_limit_enabled,
                 conntrack: prev.conntrack_enabled,
+                axi: prev.axi_enabled,
+                ports: prev.ports,
+                target: prev.target.clone(),
+                dynamic: prev.dynamic,
+                dynamic_entries: prev.dynamic_entries,
+                width: prev.width,
+                ptp: prev.ptp,
+                rss: prev.rss,
+                rss_queues: prev.rss_queues,
+                int_enabled: prev.int,
+                int_switch_id: prev.int_switch_id,
             };
 
             let outcome = deploy::deploy_to_node(

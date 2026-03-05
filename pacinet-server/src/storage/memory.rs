@@ -14,6 +14,7 @@ pub struct MemoryStorage {
     nodes: RwLock<HashMap<String, Node>>,
     policies: RwLock<HashMap<String, Policy>>,
     counters: RwLock<HashMap<String, Vec<RuleCounter>>>,
+    flow_counters: RwLock<HashMap<String, Vec<FlowCounter>>>,
     policy_versions: RwLock<HashMap<String, Vec<PolicyVersion>>>,
     deployments: RwLock<Vec<DeploymentRecord>>,
     deploying: RwLock<HashSet<String>>,
@@ -31,6 +32,7 @@ impl Default for MemoryStorage {
             nodes: RwLock::new(HashMap::new()),
             policies: RwLock::new(HashMap::new()),
             counters: RwLock::new(HashMap::new()),
+            flow_counters: RwLock::new(HashMap::new()),
             policy_versions: RwLock::new(HashMap::new()),
             deployments: RwLock::new(Vec::new()),
             deploying: RwLock::new(HashSet::new()),
@@ -80,6 +82,7 @@ impl Storage for MemoryStorage {
     fn remove_node(&self, node_id: &str) -> Result<bool, PaciNetError> {
         self.policies.write().unwrap().remove(node_id);
         self.counters.write().unwrap().remove(node_id);
+        self.flow_counters.write().unwrap().remove(node_id);
         self.policy_versions.write().unwrap().remove(node_id);
         self.deploying.write().unwrap().remove(node_id);
         Ok(self.nodes.write().unwrap().remove(node_id).is_some())
@@ -134,6 +137,22 @@ impl Storage for MemoryStorage {
         Ok(self.counters.read().unwrap().get(node_id).cloned())
     }
 
+    fn store_flow_counters(
+        &self,
+        node_id: &str,
+        counters: Vec<FlowCounter>,
+    ) -> Result<(), PaciNetError> {
+        self.flow_counters
+            .write()
+            .unwrap()
+            .insert(node_id.to_string(), counters);
+        Ok(())
+    }
+
+    fn get_flow_counters(&self, node_id: &str) -> Result<Option<Vec<FlowCounter>>, PaciNetError> {
+        Ok(self.flow_counters.read().unwrap().get(node_id).cloned())
+    }
+
     fn store_policy(&self, policy: Policy) -> Result<u64, PaciNetError> {
         let node_id = policy.node_id.clone();
         let mut versions = self.policy_versions.write().unwrap();
@@ -148,6 +167,17 @@ impl Storage for MemoryStorage {
             counters_enabled: policy.counters_enabled,
             rate_limit_enabled: policy.rate_limit_enabled,
             conntrack_enabled: policy.conntrack_enabled,
+            axi_enabled: policy.axi_enabled,
+            ports: policy.ports,
+            target: policy.target.clone(),
+            dynamic: policy.dynamic,
+            dynamic_entries: policy.dynamic_entries,
+            width: policy.width,
+            ptp: policy.ptp,
+            rss: policy.rss,
+            rss_queues: policy.rss_queues,
+            int: policy.int,
+            int_switch_id: policy.int_switch_id,
         });
         self.policies.write().unwrap().insert(node_id, policy);
         Ok(version)
@@ -504,6 +534,17 @@ mod tests {
                 counters_enabled: false,
                 rate_limit_enabled: false,
                 conntrack_enabled: false,
+                axi_enabled: false,
+                ports: 1,
+                target: "standalone".to_string(),
+                dynamic: false,
+                dynamic_entries: 16,
+                width: 8,
+                ptp: false,
+                rss: false,
+                rss_queues: 4,
+                int: false,
+                int_switch_id: 0,
             })
             .unwrap();
         storage
@@ -658,6 +699,17 @@ mod tests {
                     counters_enabled: false,
                     rate_limit_enabled: false,
                     conntrack_enabled: false,
+                    axi_enabled: false,
+                    ports: 1,
+                    target: "standalone".to_string(),
+                    dynamic: false,
+                    dynamic_entries: 16,
+                    width: 8,
+                    ptp: false,
+                    rss: false,
+                    rss_queues: 4,
+                    int: false,
+                    int_switch_id: 0,
                 })
                 .unwrap();
             assert_eq!(v, i);

@@ -118,6 +118,8 @@ message NodeInfo {
   double last_heartbeat_age_seconds = 11;
   // Phase 9: annotations
   map<string, string> annotations = 12;
+  // Agent-reported capabilities for deploy compatibility checks
+  map<string, string> capabilities = 13;
 }
 
 message RuleCounter {
@@ -126,10 +128,28 @@ message RuleCounter {
   uint64 byte_count = 3;
 }
 
+message FlowCounter {
+  string flow_key = 1;
+  uint64 packet_count = 2;
+  uint64 byte_count = 3;
+  string state = 4;
+}
+
 message CompileOptions {
   bool counters = 1;
   bool rate_limit = 2;
   bool conntrack = 3;
+  bool axi = 4;
+  uint32 ports = 5;
+  string target = 6;
+  bool dynamic = 7;
+  uint32 dynamic_entries = 8;
+  uint32 width = 9;
+  bool ptp = 10;
+  bool rss = 11;
+  uint32 rss_queues = 12;
+  bool int_enabled = 13;
+  uint32 int_switch_id = 14;
 }
 
 // ============================================================================
@@ -141,6 +161,7 @@ message RegisterNodeRequest {
   string agent_address = 2;
   map<string, string> labels = 3;
   string pacgate_version = 4;
+  map<string, string> capabilities = 5;
 }
 
 message RegisterNodeResponse {
@@ -164,6 +185,7 @@ message ReportCountersRequest {
   string node_id = 1;
   repeated RuleCounter counters = 2;
   google.protobuf.Timestamp collected_at = 3;
+  repeated FlowCounter flow_counters = 4;
 }
 
 message ReportCountersResponse {
@@ -190,6 +212,7 @@ message GetCountersRequest {}
 message GetCountersResponse {
   repeated RuleCounter counters = 1;
   google.protobuf.Timestamp collected_at = 2;
+  repeated FlowCounter flow_counters = 3;
 }
 
 message GetStatusRequest {}

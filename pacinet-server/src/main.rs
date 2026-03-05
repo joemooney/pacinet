@@ -211,7 +211,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         // Share the is_leader flag with config
         let is_leader_flag = leader.is_leader_flag();
-        config.is_leader.store(false, std::sync::atomic::Ordering::SeqCst);
+        config
+            .is_leader
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         // Copy the flag reference
         let config_flag = config.is_leader.clone();
         tokio::spawn(async move {
@@ -303,9 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Evict expired counter snapshots + update gauge
             reaper_cache.evict_expired();
-            pacinet_server::metrics::update_counter_snapshot_gauge(
-                reaper_cache.total_snapshots(),
-            );
+            pacinet_server::metrics::update_counter_snapshot_gauge(reaper_cache.total_snapshots());
 
             // Only run write operations on leader
             if !reaper_is_leader.load(std::sync::atomic::Ordering::SeqCst) {
@@ -355,8 +355,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Prune old events
             if event_max_age_days > 0 {
-                let cutoff =
-                    chrono::Utc::now() - chrono::Duration::days(event_max_age_days as i64);
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(event_max_age_days as i64);
                 let s = reaper_storage.clone();
                 let _ = tokio::task::spawn_blocking(move || s.prune_events(cutoff)).await;
             }
@@ -400,13 +399,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| "pacinet-web/dist".to_string());
         if std::path::Path::new(&static_dir).exists() {
             info!(dir = %static_dir, "Serving static files for web dashboard");
-            app = app.fallback_service(
-                tower_http::services::ServeDir::new(&static_dir)
-                    .fallback(tower_http::services::ServeFile::new(format!(
-                        "{}/index.html",
-                        static_dir
-                    ))),
-            );
+            app = app.fallback_service(tower_http::services::ServeDir::new(&static_dir).fallback(
+                tower_http::services::ServeFile::new(format!("{}/index.html", static_dir)),
+            ));
         } else {
             info!(dir = %static_dir, "Static dir not found, REST API only (dev mode)");
         }

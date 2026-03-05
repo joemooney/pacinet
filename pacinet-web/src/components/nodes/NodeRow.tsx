@@ -5,9 +5,11 @@ import Badge from '../ui/Badge';
 interface NodeRowProps {
   node: NodeJson;
   onClick: () => void;
+  selected: boolean;
+  onSelectToggle: (nodeId: string, checked: boolean) => void;
 }
 
-export default function NodeRow({ node, onClick }: NodeRowProps) {
+export default function NodeRow({ node, onClick, selected, onSelectToggle }: NodeRowProps) {
   const labels = Object.entries(node.labels);
 
   return (
@@ -15,6 +17,15 @@ export default function NodeRow({ node, onClick }: NodeRowProps) {
       className="hover:bg-surface-hover cursor-pointer transition-colors"
       onClick={onClick}
     >
+      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(e) => onSelectToggle(node.node_id, e.target.checked)}
+          className="h-4 w-4 rounded border-edge bg-surface accent-accent"
+          aria-label={`Select node ${node.hostname}`}
+        />
+      </td>
       <td className="px-4 py-3 font-medium">{node.hostname}</td>
       <td className="px-4 py-3">
         <Badge className={stateColorClass(node.state)}>{node.state}</Badge>

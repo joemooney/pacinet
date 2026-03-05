@@ -6,6 +6,7 @@ members = [
     "pacinet-server",
     "pacinet-agent",
     "pacinet-cli",
+    "pacinet-sim",
 ]
 
 [workspace.package]

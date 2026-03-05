@@ -26,14 +26,14 @@ export default function RecentEvents() {
     .slice(0, 20);
 
   if (unified.length === 0) {
-    return <div className="text-sm text-content-muted py-4">No events yet. Events appear here in real time via SSE.</div>;
+    return <div className="text-sm text-content-muted py-4">No events yet. Live telemetry appears here when node/FSM streams are active.</div>;
   }
 
   return (
-    <div className="space-y-2 max-h-64 overflow-y-auto">
+    <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
       {unified.map((e, i) => (
-        <div key={i} className="flex items-start gap-3 text-sm py-1">
-          <Badge className={e.type === 'node' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'}>
+        <div key={i} className="flex items-start gap-3 text-sm py-2 px-2 rounded-lg hover:bg-surface-hover/70 transition-colors">
+          <Badge className={e.type === 'node' ? 'bg-cyan-500/20 text-cyan-400' : 'bg-amber-500/20 text-amber-400'}>
             {e.type}
           </Badge>
           <span className="text-content flex-1">{e.summary}</span>

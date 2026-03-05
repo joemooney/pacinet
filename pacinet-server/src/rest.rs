@@ -57,6 +57,7 @@ pub struct NodeJson {
     pub policy_hash: String,
     pub last_heartbeat_age_seconds: f64,
     pub annotations: HashMap<String, String>,
+    pub capabilities: HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +69,17 @@ pub struct PolicyJson {
     pub counters_enabled: bool,
     pub rate_limit_enabled: bool,
     pub conntrack_enabled: bool,
+    pub axi_enabled: bool,
+    pub ports: u32,
+    pub target: String,
+    pub dynamic: bool,
+    pub dynamic_entries: u32,
+    pub width: u32,
+    pub ptp: bool,
+    pub rss: bool,
+    pub rss_queues: u32,
+    pub int: bool,
+    pub int_switch_id: u32,
 }
 
 #[derive(Serialize)]
@@ -85,12 +97,41 @@ pub struct RuleCounterJson {
 }
 
 #[derive(Serialize)]
+pub struct FlowCounterJson {
+    pub flow_key: String,
+    pub packet_count: u64,
+    pub byte_count: u64,
+    pub state: String,
+}
+
+#[derive(Serialize)]
+pub struct FlowCounterSetJson {
+    pub node_id: String,
+    pub flow_counters: Vec<FlowCounterJson>,
+    pub collected_at: String,
+}
+
+#[derive(Serialize)]
 pub struct PolicyVersionJson {
     pub version: u64,
     pub node_id: String,
     pub rules_yaml: String,
     pub policy_hash: String,
     pub deployed_at: String,
+    pub counters_enabled: bool,
+    pub rate_limit_enabled: bool,
+    pub conntrack_enabled: bool,
+    pub axi_enabled: bool,
+    pub ports: u32,
+    pub target: String,
+    pub dynamic: bool,
+    pub dynamic_entries: u32,
+    pub width: u32,
+    pub ptp: bool,
+    pub rss: bool,
+    pub rss_queues: u32,
+    pub int: bool,
+    pub int_switch_id: u32,
 }
 
 #[derive(Serialize)]
@@ -303,6 +344,28 @@ pub struct DeployRequest {
     #[serde(default)]
     pub conntrack: bool,
     #[serde(default)]
+    pub axi: bool,
+    #[serde(default = "default_ports")]
+    pub ports: u32,
+    #[serde(default = "default_target")]
+    pub target: String,
+    #[serde(default)]
+    pub dynamic: bool,
+    #[serde(default = "default_dynamic_entries")]
+    pub dynamic_entries: u32,
+    #[serde(default = "default_width")]
+    pub width: u32,
+    #[serde(default)]
+    pub ptp: bool,
+    #[serde(default)]
+    pub rss: bool,
+    #[serde(default = "default_rss_queues")]
+    pub rss_queues: u32,
+    #[serde(default)]
+    pub int: bool,
+    #[serde(default)]
+    pub int_switch_id: u32,
+    #[serde(default)]
     pub dry_run: bool,
 }
 
@@ -317,7 +380,49 @@ pub struct BatchDeployRequest {
     #[serde(default)]
     pub conntrack: bool,
     #[serde(default)]
+    pub axi: bool,
+    #[serde(default = "default_ports")]
+    pub ports: u32,
+    #[serde(default = "default_target")]
+    pub target: String,
+    #[serde(default)]
+    pub dynamic: bool,
+    #[serde(default = "default_dynamic_entries")]
+    pub dynamic_entries: u32,
+    #[serde(default = "default_width")]
+    pub width: u32,
+    #[serde(default)]
+    pub ptp: bool,
+    #[serde(default)]
+    pub rss: bool,
+    #[serde(default = "default_rss_queues")]
+    pub rss_queues: u32,
+    #[serde(default)]
+    pub int: bool,
+    #[serde(default)]
+    pub int_switch_id: u32,
+    #[serde(default)]
     pub dry_run: bool,
+}
+
+fn default_ports() -> u32 {
+    1
+}
+
+fn default_target() -> String {
+    "standalone".to_string()
+}
+
+fn default_dynamic_entries() -> u32 {
+    16
+}
+
+fn default_width() -> u32 {
+    8
+}
+
+fn default_rss_queues() -> u32 {
+    4
 }
 
 #[derive(Deserialize)]
@@ -392,6 +497,28 @@ pub struct StartFsmRequest {
     pub rate_limit: bool,
     #[serde(default)]
     pub conntrack: bool,
+    #[serde(default)]
+    pub axi: bool,
+    #[serde(default = "default_ports")]
+    pub ports: u32,
+    #[serde(default = "default_target")]
+    pub target: String,
+    #[serde(default)]
+    pub dynamic: bool,
+    #[serde(default = "default_dynamic_entries")]
+    pub dynamic_entries: u32,
+    #[serde(default = "default_width")]
+    pub width: u32,
+    #[serde(default)]
+    pub ptp: bool,
+    #[serde(default)]
+    pub rss: bool,
+    #[serde(default = "default_rss_queues")]
+    pub rss_queues: u32,
+    #[serde(default)]
+    pub int: bool,
+    #[serde(default)]
+    pub int_switch_id: u32,
     #[serde(default)]
     pub target_label_filter: HashMap<String, String>,
 }
@@ -635,8 +762,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/nodes/{id}", get(get_node).delete(remove_node))
         .route("/api/nodes/{id}/policy", get(get_policy))
         .route("/api/nodes/{id}/counters", get(get_node_counters))
+        .route("/api/nodes/{id}/flow-counters", get(get_node_flow_counters))
         .route("/api/nodes/{id}/policy/history", get(get_policy_history))
-        .route("/api/nodes/{id}/deploy/history", get(get_deployment_history))
+        .route(
+            "/api/nodes/{id}/deploy/history",
+            get(get_deployment_history),
+        )
         .route("/api/nodes/{id}/policy/rollback", post(rollback_policy))
         .route(
             "/api/nodes/{id}/annotations",
@@ -646,6 +777,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/fleet", get(get_fleet_status))
         // Counters
         .route("/api/counters", get(get_aggregate_counters))
+        .route("/api/flow-counters", get(get_aggregate_flow_counters))
         // Deploy
         .route("/api/deploy", post(deploy_policy))
         .route("/api/deploy/batch", post(batch_deploy_policy))
@@ -675,10 +807,7 @@ pub fn router(state: AppState) -> Router {
         // Phase 9: Audit
         .route("/api/audit", get(get_audit_log))
         // Phase 9: Templates
-        .route(
-            "/api/templates",
-            get(list_templates).post(create_template),
-        )
+        .route("/api/templates", get(list_templates).post(create_template))
         .route(
             "/api/templates/{name}",
             get(get_template).delete(delete_template),
@@ -706,8 +835,7 @@ async fn list_nodes(
     let nodes = blocking(&state.storage, move |s| s.list_nodes(&label_filter)).await?;
 
     let node_ids: Vec<String> = nodes.iter().map(|n| n.node_id.clone()).collect();
-    let policies =
-        blocking(&state.storage, move |s| s.get_policies_for_nodes(&node_ids)).await?;
+    let policies = blocking(&state.storage, move |s| s.get_policies_for_nodes(&node_ids)).await?;
 
     let now = chrono::Utc::now();
     let result: Vec<NodeJson> = nodes
@@ -728,6 +856,7 @@ async fn list_nodes(
                 policy_hash: policy.map(|p| p.policy_hash.clone()).unwrap_or_default(),
                 last_heartbeat_age_seconds: heartbeat_age,
                 annotations: n.annotations.clone(),
+                capabilities: n.capabilities.clone(),
             }
         })
         .collect();
@@ -762,6 +891,7 @@ async fn get_node(
         policy_hash: policy.map(|p| p.policy_hash).unwrap_or_default(),
         last_heartbeat_age_seconds: heartbeat_age,
         annotations: node.annotations,
+        capabilities: node.capabilities,
     }))
 }
 
@@ -772,11 +902,10 @@ async fn remove_node(
     require_leader(&state.config)?;
     // Fetch node before removal for event emission
     let nid = id.clone();
-    let node_before =
-        blocking(&state.storage, move |s| s.get_node(&nid))
-            .await
-            .ok()
-            .flatten();
+    let node_before = blocking(&state.storage, move |s| s.get_node(&nid))
+        .await
+        .ok()
+        .flatten();
 
     let node_id = id.clone();
     let removed = blocking(&state.storage, move |s| s.remove_node(&node_id)).await?;
@@ -821,12 +950,7 @@ async fn get_policy(
     let node_id = id.clone();
     let policy = blocking(&state.storage, move |s| s.get_policy(&node_id))
         .await?
-        .ok_or_else(|| {
-            AppError(
-                StatusCode::NOT_FOUND,
-                format!("No policy for node {}", id),
-            )
-        })?;
+        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("No policy for node {}", id)))?;
 
     Ok(Json(PolicyJson {
         node_id: policy.node_id,
@@ -836,6 +960,17 @@ async fn get_policy(
         counters_enabled: policy.counters_enabled,
         rate_limit_enabled: policy.rate_limit_enabled,
         conntrack_enabled: policy.conntrack_enabled,
+        axi_enabled: policy.axi_enabled,
+        ports: policy.ports,
+        target: policy.target,
+        dynamic: policy.dynamic,
+        dynamic_entries: policy.dynamic_entries,
+        width: policy.width,
+        ptp: policy.ptp,
+        rss: policy.rss,
+        rss_queues: policy.rss_queues,
+        int: policy.int,
+        int_switch_id: policy.int_switch_id,
     }))
 }
 
@@ -846,8 +981,10 @@ async fn get_policy_history(
 ) -> Result<Json<Vec<PolicyVersionJson>>, AppError> {
     let node_id = id;
     let limit = q.limit;
-    let versions =
-        blocking(&state.storage, move |s| s.get_policy_history(&node_id, limit)).await?;
+    let versions = blocking(&state.storage, move |s| {
+        s.get_policy_history(&node_id, limit)
+    })
+    .await?;
 
     let result: Vec<PolicyVersionJson> = versions
         .into_iter()
@@ -857,6 +994,20 @@ async fn get_policy_history(
             rules_yaml: v.rules_yaml,
             policy_hash: v.policy_hash,
             deployed_at: v.deployed_at.to_rfc3339(),
+            counters_enabled: v.counters_enabled,
+            rate_limit_enabled: v.rate_limit_enabled,
+            conntrack_enabled: v.conntrack_enabled,
+            axi_enabled: v.axi_enabled,
+            ports: v.ports,
+            target: v.target,
+            dynamic: v.dynamic,
+            dynamic_entries: v.dynamic_entries,
+            width: v.width,
+            ptp: v.ptp,
+            rss: v.rss,
+            rss_queues: v.rss_queues,
+            int: v.int,
+            int_switch_id: v.int_switch_id,
         })
         .collect();
 
@@ -870,8 +1021,7 @@ async fn get_deployment_history(
 ) -> Result<Json<Vec<DeploymentJson>>, AppError> {
     let node_id = id;
     let limit = q.limit;
-    let records =
-        blocking(&state.storage, move |s| s.get_deployments(&node_id, limit)).await?;
+    let records = blocking(&state.storage, move |s| s.get_deployments(&node_id, limit)).await?;
 
     let result: Vec<DeploymentJson> = records
         .into_iter()
@@ -903,8 +1053,7 @@ async fn rollback_policy(
 
     // Get policy history
     let node_id = id.clone();
-    let versions =
-        blocking(&state.storage, move |s| s.get_policy_history(&node_id, 10)).await?;
+    let versions = blocking(&state.storage, move |s| s.get_policy_history(&node_id, 10)).await?;
 
     if versions.is_empty() {
         return Ok(Json(RollbackResponse {
@@ -941,6 +1090,17 @@ async fn rollback_policy(
         counters: target.counters_enabled,
         rate_limit: target.rate_limit_enabled,
         conntrack: target.conntrack_enabled,
+        axi: target.axi_enabled,
+        ports: target.ports,
+        target: target.target.clone(),
+        dynamic: target.dynamic,
+        dynamic_entries: target.dynamic_entries,
+        width: target.width,
+        ptp: target.ptp,
+        rss: target.rss,
+        rss_queues: target.rss_queues,
+        int_enabled: target.int,
+        int_switch_id: target.int_switch_id,
     };
 
     // Acquire deploy guard
@@ -998,6 +1158,30 @@ async fn get_node_counters(
     }))
 }
 
+async fn get_node_flow_counters(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<FlowCounterSetJson>, AppError> {
+    let node_id = id.clone();
+    let flow_counters = blocking(&state.storage, move |s| s.get_flow_counters(&node_id))
+        .await?
+        .unwrap_or_default();
+
+    Ok(Json(FlowCounterSetJson {
+        node_id: id,
+        flow_counters: flow_counters
+            .into_iter()
+            .map(|c| FlowCounterJson {
+                flow_key: c.flow_key,
+                packet_count: c.packet_count,
+                byte_count: c.byte_count,
+                state: c.state,
+            })
+            .collect(),
+        collected_at: chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
 async fn get_aggregate_counters(
     State(state): State<AppState>,
     Query(q): Query<LabelQuery>,
@@ -1027,6 +1211,38 @@ async fn get_aggregate_counters(
     Ok(Json(result))
 }
 
+async fn get_aggregate_flow_counters(
+    State(state): State<AppState>,
+    Query(q): Query<LabelQuery>,
+) -> Result<Json<Vec<FlowCounterSetJson>>, AppError> {
+    let label_filter = parse_label_filter(&q.label);
+    let nodes = blocking(&state.storage, move |s| s.list_nodes(&label_filter)).await?;
+
+    let mut result = Vec::new();
+    for node in &nodes {
+        let nid = node.node_id.clone();
+        if let Some(flow_counters) =
+            blocking(&state.storage, move |s| s.get_flow_counters(&nid)).await?
+        {
+            result.push(FlowCounterSetJson {
+                node_id: node.node_id.clone(),
+                flow_counters: flow_counters
+                    .into_iter()
+                    .map(|c| FlowCounterJson {
+                        flow_key: c.flow_key,
+                        packet_count: c.packet_count,
+                        byte_count: c.byte_count,
+                        state: c.state,
+                    })
+                    .collect(),
+                collected_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+    }
+
+    Ok(Json(result))
+}
+
 // ============================================================================
 // Fleet handler
 // ============================================================================
@@ -1039,8 +1255,7 @@ async fn get_fleet_status(
     let nodes = blocking(&state.storage, move |s| s.list_nodes(&label_filter)).await?;
 
     let node_ids: Vec<String> = nodes.iter().map(|n| n.node_id.clone()).collect();
-    let policies =
-        blocking(&state.storage, move |s| s.get_policies_for_nodes(&node_ids)).await?;
+    let policies = blocking(&state.storage, move |s| s.get_policies_for_nodes(&node_ids)).await?;
 
     let total_nodes = nodes.len() as u32;
     let mut nodes_by_state: HashMap<String, u32> = HashMap::new();
@@ -1097,9 +1312,7 @@ async fn deploy_policy(
         let new_hash = pacinet_core::policy_hash(&body.rules_yaml);
         let nid = body.node_id.clone();
         let current_policy = blocking(&state.storage, move |s| s.get_policy(&nid)).await?;
-        let current_hash = current_policy
-            .map(|p| p.policy_hash)
-            .unwrap_or_default();
+        let current_hash = current_policy.map(|p| p.policy_hash).unwrap_or_default();
 
         return Ok(Json(DeployResponse {
             success: true,
@@ -1123,6 +1336,17 @@ async fn deploy_policy(
         counters: body.counters,
         rate_limit: body.rate_limit,
         conntrack: body.conntrack,
+        axi: body.axi,
+        ports: body.ports,
+        target: body.target.clone(),
+        dynamic: body.dynamic,
+        dynamic_entries: body.dynamic_entries,
+        width: body.width,
+        ptp: body.ptp,
+        rss: body.rss,
+        rss_queues: body.rss_queues,
+        int_enabled: body.int,
+        int_switch_id: body.int_switch_id,
     };
 
     // Acquire deploy guard
@@ -1180,6 +1404,17 @@ async fn batch_deploy_policy(
         counters: body.counters,
         rate_limit: body.rate_limit,
         conntrack: body.conntrack,
+        axi: body.axi,
+        ports: body.ports,
+        target: body.target.clone(),
+        dynamic: body.dynamic,
+        dynamic_entries: body.dynamic_entries,
+        width: body.width,
+        ptp: body.ptp,
+        rss: body.rss,
+        rss_queues: body.rss_queues,
+        int_enabled: body.int,
+        int_switch_id: body.int_switch_id,
     };
 
     let action_result = deploy::deploy_to_nodes(
@@ -1202,10 +1437,7 @@ async fn batch_deploy_policy(
         .node_results
         .into_iter()
         .map(|r| NodeDeployResultJson {
-            hostname: hostname_map
-                .get(&r.node_id)
-                .cloned()
-                .unwrap_or_default(),
+            hostname: hostname_map.get(&r.node_id).cloned().unwrap_or_default(),
             node_id: r.node_id,
             success: r.success,
             message: r.message,
@@ -1285,8 +1517,12 @@ async fn create_fsm_definition(
     require_leader(&state.config)?;
     let def = pacinet_core::fsm::FsmDefinition::from_yaml(&body.definition_yaml)
         .map_err(|e| AppError(StatusCode::BAD_REQUEST, format!("Invalid YAML: {}", e)))?;
-    def.validate()
-        .map_err(|e| AppError(StatusCode::BAD_REQUEST, format!("Invalid definition: {}", e)))?;
+    def.validate().map_err(|e| {
+        AppError(
+            StatusCode::BAD_REQUEST,
+            format!("Invalid definition: {}", e),
+        )
+    })?;
     let name = def.name.clone();
 
     blocking(&state.storage, move |s| s.store_fsm_definition(def)).await?;
@@ -1313,8 +1549,7 @@ async fn delete_fsm_definition(
 ) -> Result<Json<SuccessResponse>, AppError> {
     require_leader(&state.config)?;
     let def_name = name.clone();
-    let deleted =
-        blocking(&state.storage, move |s| s.delete_fsm_definition(&def_name)).await?;
+    let deleted = blocking(&state.storage, move |s| s.delete_fsm_definition(&def_name)).await?;
 
     Ok(Json(SuccessResponse {
         success: deleted,
@@ -1349,10 +1584,7 @@ async fn list_fsm_instances(
     })
     .await?;
 
-    let result: Vec<FsmInstanceJson> = instances
-        .iter()
-        .map(instance_to_json)
-        .collect();
+    let result: Vec<FsmInstanceJson> = instances.iter().map(instance_to_json).collect();
 
     Ok(Json(result))
 }
@@ -1383,6 +1615,17 @@ async fn start_fsm(
         counters: body.counters,
         rate_limit: body.rate_limit,
         conntrack: body.conntrack,
+        axi: body.axi,
+        ports: body.ports,
+        target: body.target,
+        dynamic: body.dynamic,
+        dynamic_entries: body.dynamic_entries,
+        width: body.width,
+        ptp: body.ptp,
+        rss: body.rss,
+        rss_queues: body.rss_queues,
+        int: body.int,
+        int_switch_id: body.int_switch_id,
     });
 
     let result = if !body.target_label_filter.is_empty() {

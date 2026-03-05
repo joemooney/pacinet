@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PaciNet Simulator</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --surface: #ffffff;
+      --ink: #14213d;
+      --muted: #51607a;
+      --accent: #007f5f;
+      --accent-2: #00a896;
+      --warn: #b42318;
+      --border: #d6dce8;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top left, #e8f9f2, transparent 38%), var(--bg);
+      color: var(--ink);
+    }
+
+    .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+
+    .hero {
+      grid-column: 1 / -1;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #fff;
+      border-radius: 16px;
+      padding: 20px;
+    }
+
+    h1 {
+      margin: 0 0 4px;
+      font-size: 1.6rem;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 10px 25px rgba(20, 33, 61, 0.04);
+    }
+
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.92rem;
+      margin-bottom: 8px;
+      background: #fff;
+    }
+
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-weight: 600;
+      color: #fff;
+      background: var(--accent);
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: #284b63;
+    }
+
+    button.warn {
+      background: var(--warn);
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .json {
+      grid-column: 1 / -1;
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 12px;
+      padding: 12px;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.8rem;
+      min-height: 220px;
+      white-space: pre-wrap;
+      overflow: auto;
+    }
+
+    .streams {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 10px;
+    }
+
+    .stream-box {
+      background: #111827;
+      color: #d1fae5;
+      border-radius: 10px;
+      min-height: 160px;
+      max-height: 260px;
+      overflow: auto;
+      padding: 10px;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.75rem;
+      white-space: pre-wrap;
+    }
+
+    .status {
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    @media (max-width: 720px) {
+      .hero { border-radius: 10px; }
+      .wrap { padding: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <h1>PaciNet Simulator</h1>
+      <div>Trigger synthetic events and inspect pacinet responses side-by-side.</div>
+      <div id="config" class="status"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Register Node</h2>
+      <label>Hostname</label>
+      <input id="reg-hostname" value="sim-ui-node" />
+      <label>Agent Address</label>
+      <input id="reg-agent" value="127.0.0.1:55001" />
+      <label>Labels JSON</label>
+      <textarea id="reg-labels" rows="3">{"sim":"true","from":"ui"}</textarea>
+      <button id="btn-register">Register</button>
+    </section>
+
+    <section class="panel">
+      <h2>Heartbeat</h2>
+      <label>Node ID</label>
+      <input id="hb-node" placeholder="paste node id" />
+      <label>State</label>
+      <select id="hb-state">
+        <option value="online">online</option>
+        <option value="active">active</option>
+        <option value="deploying">deploying</option>
+        <option value="error">error</option>
+        <option value="offline">offline</option>
+      </select>
+      <label>Uptime Seconds</label>
+      <input id="hb-uptime" type="number" value="15" />
+      <button id="btn-heartbeat" class="secondary">Send Heartbeat</button>
+    </section>
+
+    <section class="panel">
+      <h2>Report Counters</h2>
+      <label>Node ID</label>
+      <input id="ctr-node" placeholder="paste node id" />
+      <label>Rule Name</label>
+      <input id="ctr-rule" value="allow-web" />
+      <label>Match Delta</label>
+      <input id="ctr-match" type="number" value="100" />
+      <label>Byte Delta</label>
+      <input id="ctr-bytes" type="number" value="12000" />
+      <button id="btn-counters" class="secondary">Report Counters</button>
+    </section>
+
+    <section class="panel">
+      <h2>Scenarios & Snapshot</h2>
+      <div class="row">
+        <button id="btn-scenario-basic">Run Basic</button>
+        <button id="btn-scenario-burst">Run Burst</button>
+        <button id="btn-scenario-flap">Run Flap</button>
+        <button id="btn-scenario-canary">Run Canary Traffic</button>
+        <button id="btn-snapshot" class="secondary">Fetch Pacinet Snapshot</button>
+        <button id="btn-nodes" class="warn">List Simulator Nodes</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Live Streams</h2>
+      <div class="row">
+        <button id="btn-stream-connect">Connect Streams</button>
+        <button id="btn-stream-disconnect" class="warn">Disconnect Streams</button>
+      </div>
+      <div class="status" id="stream-status">disconnected</div>
+    </section>
+
+    <section class="panel">
+      <h2>PacGate Scenarios</h2>
+      <label>Scenario JSON Path</label>
+      <input id="pg-scenario-path" value="docs/management/paclab/scenarios/allow_arp_regression_v1.json" />
+      <label>Regress Count</label>
+      <input id="pg-regress-count" type="number" value="1000" />
+      <div class="row">
+        <button id="btn-pg-regress">Run Regress</button>
+        <button id="btn-pg-topology" class="secondary">Run Topology</button>
+      </div>
+    </section>
+
+    <section class="streams">
+      <div class="stream-box" id="stream-nodes"></div>
+      <div class="stream-box" id="stream-counters"></div>
+      <div class="stream-box" id="stream-fsm"></div>
+    </section>
+
+    <section class="json" id="output"></section>
+  </main>
+
+  <script>
+    const output = document.getElementById('output');
+    const streamStatus = document.getElementById('stream-status');
+    const streamNodes = document.getElementById('stream-nodes');
+    const streamCounters = document.getElementById('stream-counters');
+    const streamFsm = document.getElementById('stream-fsm');
+    let streamRefs = [];
+
+    function render(data) {
+      output.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function appendStream(box, label, payload) {
+      const stamp = new Date().toISOString();
+      box.textContent = `[${stamp}] ${label}\n${payload}\n\n` + box.textContent;
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      const text = await res.text();
+      let payload;
+      try { payload = JSON.parse(text); } catch { payload = { raw: text }; }
+      render({ status: res.status, payload });
+      return payload;
+    }
+
+    function parseJsonField(id) {
+      const value = document.getElementById(id).value.trim();
+      if (!value) return {};
+      return JSON.parse(value);
+    }
+
+    document.getElementById('btn-register').onclick = async () => {
+      try {
+        const data = await api('/api/sim/register-node', {
+          method: 'POST',
+          body: JSON.stringify({
+            hostname: document.getElementById('reg-hostname').value,
+            agent_address: document.getElementById('reg-agent').value,
+            labels: parseJsonField('reg-labels'),
+          }),
+        });
+        const nodeId = data?.data?.node_id;
+        if (nodeId) {
+          document.getElementById('hb-node').value = nodeId;
+          document.getElementById('ctr-node').value = nodeId;
+        }
+      } catch (err) {
+        render({ error: String(err) });
+      }
+    };
+
+    document.getElementById('btn-heartbeat').onclick = async () => {
+      await api('/api/sim/heartbeat', {
+        method: 'POST',
+        body: JSON.stringify({
+          node_id: document.getElementById('hb-node').value,
+          state: document.getElementById('hb-state').value,
+          uptime_seconds: Number(document.getElementById('hb-uptime').value),
+        }),
+      });
+    };
+
+    document.getElementById('btn-counters').onclick = async () => {
+      await api('/api/sim/counters', {
+        method: 'POST',
+        body: JSON.stringify({
+          node_id: document.getElementById('ctr-node').value,
+          counters: [{
+            rule_name: document.getElementById('ctr-rule').value,
+            match_delta: Number(document.getElementById('ctr-match').value),
+            byte_delta: Number(document.getElementById('ctr-bytes').value),
+          }],
+        }),
+      });
+    };
+
+    document.getElementById('btn-scenario-basic').onclick = async () => {
+      await api('/api/sim/scenario/basic', { method: 'POST' });
+    };
+
+    document.getElementById('btn-scenario-burst').onclick = async () => {
+      await api('/api/sim/scenario/burst', { method: 'POST' });
+    };
+
+    document.getElementById('btn-scenario-flap').onclick = async () => {
+      await api('/api/sim/scenario/flap', { method: 'POST' });
+    };
+
+    document.getElementById('btn-scenario-canary').onclick = async () => {
+      await api('/api/sim/scenario/canary-traffic', { method: 'POST' });
+    };
+
+    document.getElementById('btn-snapshot').onclick = async () => {
+      await api('/api/pacinet/snapshot?event_limit=50');
+    };
+
+    document.getElementById('btn-nodes').onclick = async () => {
+      await api('/api/sim/nodes');
+    };
+
+    function disconnectStreams() {
+      for (const src of streamRefs) {
+        src.close();
+      }
+      streamRefs = [];
+      streamStatus.textContent = 'disconnected';
+    }
+
+    function connectStream(path, box, name) {
+      const src = new EventSource(path);
+      src.onopen = () => appendStream(box, `${name} stream`, 'connected');
+      src.onmessage = (evt) => appendStream(box, name, evt.data);
+      src.onerror = () => appendStream(box, `${name} stream`, 'error or reconnect');
+      src.addEventListener('proxy-error', (evt) => appendStream(box, `${name} proxy-error`, evt.data));
+      streamRefs.push(src);
+    }
+
+    document.getElementById('btn-stream-connect').onclick = () => {
+      disconnectStreams();
+      streamStatus.textContent = 'connecting';
+      connectStream('/api/pacinet/stream/nodes', streamNodes, 'nodes');
+      connectStream('/api/pacinet/stream/counters', streamCounters, 'counters');
+      connectStream('/api/pacinet/stream/fsm', streamFsm, 'fsm');
+      streamStatus.textContent = 'connected';
+    };
+
+    document.getElementById('btn-stream-disconnect').onclick = () => {
+      disconnectStreams();
+    };
+
+    document.getElementById('btn-pg-regress').onclick = async () => {
+      await api('/api/pacgate/scenario/regress', {
+        method: 'POST',
+        body: JSON.stringify({
+          scenario_path: document.getElementById('pg-scenario-path').value,
+          count: Number(document.getElementById('pg-regress-count').value),
+        }),
+      });
+    };
+
+    document.getElementById('btn-pg-topology').onclick = async () => {
+      await api('/api/pacgate/scenario/topology', {
+        method: 'POST',
+        body: JSON.stringify({
+          scenario_path: document.getElementById('pg-scenario-path').value,
+        }),
+      });
+    };
+
+    (async function loadConfig() {
+      try {
+        const res = await fetch('/api/sim/config');
+        const cfg = await res.json();
+        document.getElementById('config').textContent =
+          `gRPC: ${cfg.grpc_endpoint} | REST: ${cfg.rest_base} | PacGate: ${cfg.pacgate_bin} @ ${cfg.pacgate_repo} | API key: ${cfg.api_key_configured ? 'set' : 'not set'}`;
+      } catch (err) {
+        document.getElementById('config').textContent = `Failed to load config: ${String(err)}`;
+      }
+    })();
+  </script>
+</body>
+</html>

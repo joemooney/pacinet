@@ -20,6 +20,38 @@ impl SqliteStorage {
             .map_err(|e| PaciNetError::Internal(format!("Failed to open database: {}", e)))?;
         conn.execute_batch(SCHEMA)
             .map_err(|e| PaciNetError::Internal(format!("Failed to initialize schema: {}", e)))?;
+        // Lightweight migration for pre-capabilities databases.
+        let _ = conn.execute(
+            "ALTER TABLE nodes ADD COLUMN capabilities TEXT NOT NULL DEFAULT '{}'",
+            [],
+        );
+        let policy_migrations = [
+            "ALTER TABLE policies ADD COLUMN axi_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policies ADD COLUMN ports INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE policies ADD COLUMN target TEXT NOT NULL DEFAULT 'standalone'",
+            "ALTER TABLE policies ADD COLUMN dynamic INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policies ADD COLUMN dynamic_entries INTEGER NOT NULL DEFAULT 16",
+            "ALTER TABLE policies ADD COLUMN width INTEGER NOT NULL DEFAULT 8",
+            "ALTER TABLE policies ADD COLUMN ptp INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policies ADD COLUMN rss INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policies ADD COLUMN rss_queues INTEGER NOT NULL DEFAULT 4",
+            "ALTER TABLE policies ADD COLUMN int_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policies ADD COLUMN int_switch_id INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policy_versions ADD COLUMN axi_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policy_versions ADD COLUMN ports INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE policy_versions ADD COLUMN target TEXT NOT NULL DEFAULT 'standalone'",
+            "ALTER TABLE policy_versions ADD COLUMN dynamic INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policy_versions ADD COLUMN dynamic_entries INTEGER NOT NULL DEFAULT 16",
+            "ALTER TABLE policy_versions ADD COLUMN width INTEGER NOT NULL DEFAULT 8",
+            "ALTER TABLE policy_versions ADD COLUMN ptp INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policy_versions ADD COLUMN rss INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policy_versions ADD COLUMN rss_queues INTEGER NOT NULL DEFAULT 4",
+            "ALTER TABLE policy_versions ADD COLUMN int_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE policy_versions ADD COLUMN int_switch_id INTEGER NOT NULL DEFAULT 0",
+        ];
+        for sql in policy_migrations {
+            let _ = conn.execute(sql, []);
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             deploying: std::sync::RwLock::new(HashSet::new()),
@@ -36,16 +68,19 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let labels_json = serde_json::to_string(&node.labels)
             .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        let capabilities_json = serde_json::to_string(&node.capabilities)
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
         let annotations_json = serde_json::to_string(&node.annotations)
             .map_err(|e| PaciNetError::Internal(e.to_string()))?;
         conn.execute(
-            "INSERT INTO nodes (node_id, hostname, agent_address, labels, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds, annotations)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO nodes (node_id, hostname, agent_address, labels, capabilities, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds, annotations)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 &node.node_id,
                 &node.hostname,
                 &node.agent_address,
                 &labels_json,
+                &capabilities_json,
                 &node.state.to_string(),
                 node.registered_at.to_rfc3339(),
                 node.last_heartbeat.to_rfc3339(),
@@ -62,7 +97,7 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT node_id, hostname, agent_address, labels, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds, annotations
+                "SELECT node_id, hostname, agent_address, labels, capabilities, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds, annotations
                  FROM nodes WHERE node_id = ?1",
             )
             .map_err(|e| PaciNetError::Internal(e.to_string()))?;
@@ -86,7 +121,7 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT node_id, hostname, agent_address, labels, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds, annotations
+                "SELECT node_id, hostname, agent_address, labels, capabilities, state, registered_at, last_heartbeat, pacgate_version, uptime_seconds, annotations
                  FROM nodes",
             )
             .map_err(|e| PaciNetError::Internal(e.to_string()))?;
@@ -211,6 +246,43 @@ impl Storage for SqliteStorage {
         }
     }
 
+    fn store_flow_counters(
+        &self,
+        node_id: &str,
+        counters: Vec<FlowCounter>,
+    ) -> Result<(), PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let json =
+            serde_json::to_string(&counters).map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO flow_counters (node_id, data) VALUES (?1, ?2)",
+            rusqlite::params![node_id, json],
+        )
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    fn get_flow_counters(&self, node_id: &str) -> Result<Option<Vec<FlowCounter>>, PaciNetError> {
+        let conn = self.conn.lock().unwrap();
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT data FROM flow_counters WHERE node_id = ?1",
+                rusqlite::params![node_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+
+        match json {
+            None => Ok(None),
+            Some(j) => {
+                let counters: Vec<FlowCounter> =
+                    serde_json::from_str(&j).map_err(|e| PaciNetError::Internal(e.to_string()))?;
+                Ok(Some(counters))
+            }
+        }
+    }
+
     fn store_policy(&self, policy: Policy) -> Result<u64, PaciNetError> {
         let conn = self.conn.lock().unwrap();
 
@@ -229,8 +301,8 @@ impl Storage for SqliteStorage {
 
         // Insert into policy_versions
         conn.execute(
-            "INSERT INTO policy_versions (version, node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO policy_versions (version, node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled, axi_enabled, ports, target, dynamic, dynamic_entries, width, ptp, rss, rss_queues, int_enabled, int_switch_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             rusqlite::params![
                 version as i64,
                 &policy.node_id,
@@ -240,14 +312,25 @@ impl Storage for SqliteStorage {
                 policy.counters_enabled as i32,
                 policy.rate_limit_enabled as i32,
                 policy.conntrack_enabled as i32,
+                policy.axi_enabled as i32,
+                policy.ports as i64,
+                &policy.target,
+                policy.dynamic as i32,
+                policy.dynamic_entries as i64,
+                policy.width as i64,
+                policy.ptp as i32,
+                policy.rss as i32,
+                policy.rss_queues as i64,
+                policy.int as i32,
+                policy.int_switch_id as i64,
             ],
         )
         .map_err(|e| PaciNetError::Internal(e.to_string()))?;
 
         // Upsert current policy
         conn.execute(
-            "INSERT OR REPLACE INTO policies (node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO policies (node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled, axi_enabled, ports, target, dynamic, dynamic_entries, width, ptp, rss, rss_queues, int_enabled, int_switch_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             rusqlite::params![
                 &policy.node_id,
                 &policy.rules_yaml,
@@ -256,6 +339,17 @@ impl Storage for SqliteStorage {
                 policy.counters_enabled as i32,
                 policy.rate_limit_enabled as i32,
                 policy.conntrack_enabled as i32,
+                policy.axi_enabled as i32,
+                policy.ports as i64,
+                &policy.target,
+                policy.dynamic as i32,
+                policy.dynamic_entries as i64,
+                policy.width as i64,
+                policy.ptp as i32,
+                policy.rss as i32,
+                policy.rss_queues as i64,
+                policy.int as i32,
+                policy.int_switch_id as i64,
             ],
         )
         .map_err(|e| PaciNetError::Internal(e.to_string()))?;
@@ -267,7 +361,7 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let policy = conn
             .query_row(
-                "SELECT node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled
+                "SELECT node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled, axi_enabled, ports, target, dynamic, dynamic_entries, width, ptp, rss, rss_queues, int_enabled, int_switch_id
                  FROM policies WHERE node_id = ?1",
                 rusqlite::params![node_id],
                 |row| Ok(row_to_policy(row)),
@@ -290,7 +384,7 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT version, node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled
+                "SELECT version, node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled, axi_enabled, ports, target, dynamic, dynamic_entries, width, ptp, rss, rss_queues, int_enabled, int_switch_id
                  FROM policy_versions WHERE node_id = ?1 ORDER BY version DESC LIMIT ?2",
             )
             .map_err(|e| PaciNetError::Internal(e.to_string()))?;
@@ -317,7 +411,7 @@ impl Storage for SqliteStorage {
         let conn = self.conn.lock().unwrap();
         let placeholders: Vec<String> = (1..=node_ids.len()).map(|i| format!("?{}", i)).collect();
         let sql = format!(
-            "SELECT node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled
+            "SELECT node_id, rules_yaml, policy_hash, deployed_at, counters_enabled, rate_limit_enabled, conntrack_enabled, axi_enabled, ports, target, dynamic, dynamic_entries, width, ptp, rss, rss_queues, int_enabled, int_switch_id
              FROM policies WHERE node_id IN ({})",
             placeholders.join(", ")
         );
@@ -466,8 +560,8 @@ impl Storage for SqliteStorage {
 
     fn store_fsm_definition(&self, def: FsmDefinition) -> Result<(), PaciNetError> {
         let conn = self.conn.lock().unwrap();
-        let json = serde_json::to_string(&def)
-            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        let json =
+            serde_json::to_string(&def).map_err(|e| PaciNetError::Internal(e.to_string()))?;
         conn.execute(
             "INSERT OR REPLACE INTO fsm_definitions (name, kind, definition_json, created_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
@@ -495,8 +589,8 @@ impl Storage for SqliteStorage {
         match json {
             None => Ok(None),
             Some(j) => {
-                let def: FsmDefinition = serde_json::from_str(&j)
-                    .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+                let def: FsmDefinition =
+                    serde_json::from_str(&j).map_err(|e| PaciNetError::Internal(e.to_string()))?;
                 Ok(Some(def))
             }
         }
@@ -512,10 +606,7 @@ impl Storage for SqliteStorage {
                 "SELECT definition_json FROM fsm_definitions WHERE kind = ?1",
                 vec![Box::new(k.to_string())],
             ),
-            None => (
-                "SELECT definition_json FROM fsm_definitions",
-                vec![],
-            ),
+            None => ("SELECT definition_json FROM fsm_definitions", vec![]),
         };
 
         let mut stmt = conn
@@ -551,8 +642,8 @@ impl Storage for SqliteStorage {
 
     fn store_fsm_instance(&self, instance: FsmInstance) -> Result<(), PaciNetError> {
         let conn = self.conn.lock().unwrap();
-        let json = serde_json::to_string(&instance)
-            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        let json =
+            serde_json::to_string(&instance).map_err(|e| PaciNetError::Internal(e.to_string()))?;
         conn.execute(
             "INSERT INTO fsm_instances (instance_id, definition_name, status, instance_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
@@ -582,8 +673,8 @@ impl Storage for SqliteStorage {
         match json {
             None => Ok(None),
             Some(j) => {
-                let instance: FsmInstance = serde_json::from_str(&j)
-                    .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+                let instance: FsmInstance =
+                    serde_json::from_str(&j).map_err(|e| PaciNetError::Internal(e.to_string()))?;
                 Ok(Some(instance))
             }
         }
@@ -591,8 +682,8 @@ impl Storage for SqliteStorage {
 
     fn update_fsm_instance(&self, instance: FsmInstance) -> Result<(), PaciNetError> {
         let conn = self.conn.lock().unwrap();
-        let json = serde_json::to_string(&instance)
-            .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+        let json =
+            serde_json::to_string(&instance).map_err(|e| PaciNetError::Internal(e.to_string()))?;
         let affected = conn
             .execute(
                 "UPDATE fsm_instances SET status = ?1, instance_json = ?2, updated_at = ?3 WHERE instance_id = ?4",
@@ -1003,24 +1094,34 @@ impl Storage for SqliteStorage {
                 let resource_type: String = row.get(4)?;
                 let resource_id: String = row.get(5)?;
                 let details: String = row.get(6)?;
-                Ok((id, ts_str, actor, action, resource_type, resource_id, details))
-            })
-            .map_err(|e| PaciNetError::Internal(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .filter_map(|(id, ts_str, actor, action, resource_type, resource_id, details)| {
-                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
-                    .ok()?
-                    .with_timezone(&Utc);
-                Some(AuditEntry {
+                Ok((
                     id,
-                    timestamp,
+                    ts_str,
                     actor,
                     action,
                     resource_type,
                     resource_id,
                     details,
-                })
+                ))
             })
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .filter_map(
+                |(id, ts_str, actor, action, resource_type, resource_id, details)| {
+                    let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                        .ok()?
+                        .with_timezone(&Utc);
+                    Some(AuditEntry {
+                        id,
+                        timestamp,
+                        actor,
+                        action,
+                        resource_type,
+                        resource_id,
+                        details,
+                    })
+                },
+            )
             .collect();
 
         Ok(entries)
@@ -1103,16 +1204,36 @@ impl Storage for SqliteStorage {
                 let tags_json: String = row.get(3)?;
                 let created_at_str: String = row.get(4)?;
                 let updated_at_str: String = row.get(5)?;
-                Ok((name, description, rules_yaml, tags_json, created_at_str, updated_at_str))
+                Ok((
+                    name,
+                    description,
+                    rules_yaml,
+                    tags_json,
+                    created_at_str,
+                    updated_at_str,
+                ))
             })
             .map_err(|e| PaciNetError::Internal(e.to_string()))?
             .filter_map(|r| r.ok())
-            .filter_map(|(name, description, rules_yaml, tags_json, created_at_str, updated_at_str)| {
-                let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
-                let created_at = DateTime::parse_from_rfc3339(&created_at_str).ok()?.with_timezone(&Utc);
-                let updated_at = DateTime::parse_from_rfc3339(&updated_at_str).ok()?.with_timezone(&Utc);
-                Some(PolicyTemplate { name, description, rules_yaml, tags, created_at, updated_at })
-            })
+            .filter_map(
+                |(name, description, rules_yaml, tags_json, created_at_str, updated_at_str)| {
+                    let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+                    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                        .ok()?
+                        .with_timezone(&Utc);
+                    let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+                        .ok()?
+                        .with_timezone(&Utc);
+                    Some(PolicyTemplate {
+                        name,
+                        description,
+                        rules_yaml,
+                        tags,
+                        created_at,
+                        updated_at,
+                    })
+                },
+            )
             .filter(|t| tag.is_none_or(|tg| t.tags.iter().any(|tt| tt == tg)))
             .collect();
 
@@ -1190,25 +1311,51 @@ impl Storage for SqliteStorage {
                 let error: Option<String> = row.get(7)?;
                 let attempt: i64 = row.get(8)?;
                 let ts_str: String = row.get(9)?;
-                Ok((id, instance_id, url, method, status_code, success, duration_ms, error, attempt, ts_str))
-            })
-            .map_err(|e| PaciNetError::Internal(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .filter_map(|(id, instance_id, url, method, status_code, success, duration_ms, error, attempt, ts_str)| {
-                let timestamp = DateTime::parse_from_rfc3339(&ts_str).ok()?.with_timezone(&Utc);
-                Some(WebhookDelivery {
+                Ok((
                     id,
                     instance_id,
                     url,
                     method,
-                    status_code: status_code.map(|c| c as u16),
-                    success: success != 0,
-                    duration_ms: duration_ms as u64,
+                    status_code,
+                    success,
+                    duration_ms,
                     error,
-                    attempt: attempt as u32,
-                    timestamp,
-                })
+                    attempt,
+                    ts_str,
+                ))
             })
+            .map_err(|e| PaciNetError::Internal(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .filter_map(
+                |(
+                    id,
+                    instance_id,
+                    url,
+                    method,
+                    status_code,
+                    success,
+                    duration_ms,
+                    error,
+                    attempt,
+                    ts_str,
+                )| {
+                    let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                        .ok()?
+                        .with_timezone(&Utc);
+                    Some(WebhookDelivery {
+                        id,
+                        instance_id,
+                        url,
+                        method,
+                        status_code: status_code.map(|c| c as u16),
+                        success: success != 0,
+                        duration_ms: duration_ms as u64,
+                        error,
+                        attempt: attempt as u32,
+                        timestamp,
+                    })
+                },
+            )
             .collect();
 
         Ok(deliveries)
@@ -1230,24 +1377,27 @@ fn row_to_node(row: &rusqlite::Row) -> Result<Node, PaciNetError> {
     let labels_json: String = row
         .get(3)
         .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let capabilities_json: String = row.get(4).unwrap_or_else(|_| "{}".to_string());
     let state_str: String = row
-        .get(4)
-        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
-    let registered_at_str: String = row
         .get(5)
         .map_err(|e| PaciNetError::Internal(e.to_string()))?;
-    let last_heartbeat_str: String = row
+    let registered_at_str: String = row
         .get(6)
         .map_err(|e| PaciNetError::Internal(e.to_string()))?;
-    let pacgate_version: String = row
+    let last_heartbeat_str: String = row
         .get(7)
         .map_err(|e| PaciNetError::Internal(e.to_string()))?;
-    let uptime_seconds: i64 = row
+    let pacgate_version: String = row
         .get(8)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let uptime_seconds: i64 = row
+        .get(9)
         .map_err(|e| PaciNetError::Internal(e.to_string()))?;
 
     let labels: HashMap<String, String> =
         serde_json::from_str(&labels_json).map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let capabilities: HashMap<String, String> = serde_json::from_str(&capabilities_json)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
     let state: NodeState = state_str
         .parse()
         .map_err(|e: String| PaciNetError::Internal(e))?;
@@ -1258,7 +1408,7 @@ fn row_to_node(row: &rusqlite::Row) -> Result<Node, PaciNetError> {
         .map_err(|e| PaciNetError::Internal(e.to_string()))?
         .with_timezone(&Utc);
 
-    let annotations_json: String = row.get(9).unwrap_or_else(|_| "{}".to_string());
+    let annotations_json: String = row.get(10).unwrap_or_else(|_| "{}".to_string());
     let annotations: HashMap<String, String> =
         serde_json::from_str(&annotations_json).unwrap_or_default();
 
@@ -1267,6 +1417,7 @@ fn row_to_node(row: &rusqlite::Row) -> Result<Node, PaciNetError> {
         hostname,
         agent_address,
         labels,
+        capabilities,
         state,
         registered_at,
         last_heartbeat,
@@ -1298,6 +1449,39 @@ fn row_to_policy(row: &rusqlite::Row) -> Result<Policy, PaciNetError> {
     let conntrack: i32 = row
         .get(6)
         .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let axi_enabled: i32 = row
+        .get(7)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let ports: i64 = row
+        .get(8)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let target: String = row
+        .get(9)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let dynamic: i32 = row
+        .get(10)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let dynamic_entries: i64 = row
+        .get(11)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let width: i64 = row
+        .get(12)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let ptp: i32 = row
+        .get(13)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let rss: i32 = row
+        .get(14)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let rss_queues: i64 = row
+        .get(15)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let int_enabled: i32 = row
+        .get(16)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let int_switch_id: i64 = row
+        .get(17)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
 
     let deployed_at = DateTime::parse_from_rfc3339(&deployed_at_str)
         .map_err(|e| PaciNetError::Internal(e.to_string()))?
@@ -1311,6 +1495,17 @@ fn row_to_policy(row: &rusqlite::Row) -> Result<Policy, PaciNetError> {
         counters_enabled: counters != 0,
         rate_limit_enabled: rate_limit != 0,
         conntrack_enabled: conntrack != 0,
+        axi_enabled: axi_enabled != 0,
+        ports: ports as u32,
+        target,
+        dynamic: dynamic != 0,
+        dynamic_entries: dynamic_entries as u32,
+        width: width as u32,
+        ptp: ptp != 0,
+        rss: rss != 0,
+        rss_queues: rss_queues as u32,
+        int: int_enabled != 0,
+        int_switch_id: int_switch_id as u32,
     })
 }
 
@@ -1339,6 +1534,39 @@ fn row_to_policy_version(row: &rusqlite::Row) -> Result<PolicyVersion, PaciNetEr
     let conntrack: i32 = row
         .get(7)
         .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let axi_enabled: i32 = row
+        .get(8)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let ports: i64 = row
+        .get(9)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let target: String = row
+        .get(10)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let dynamic: i32 = row
+        .get(11)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let dynamic_entries: i64 = row
+        .get(12)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let width: i64 = row
+        .get(13)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let ptp: i32 = row
+        .get(14)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let rss: i32 = row
+        .get(15)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let rss_queues: i64 = row
+        .get(16)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let int_enabled: i32 = row
+        .get(17)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
+    let int_switch_id: i64 = row
+        .get(18)
+        .map_err(|e| PaciNetError::Internal(e.to_string()))?;
 
     let deployed_at = DateTime::parse_from_rfc3339(&deployed_at_str)
         .map_err(|e| PaciNetError::Internal(e.to_string()))?
@@ -1353,6 +1581,17 @@ fn row_to_policy_version(row: &rusqlite::Row) -> Result<PolicyVersion, PaciNetEr
         counters_enabled: counters != 0,
         rate_limit_enabled: rate_limit != 0,
         conntrack_enabled: conntrack != 0,
+        axi_enabled: axi_enabled != 0,
+        ports: ports as u32,
+        target,
+        dynamic: dynamic != 0,
+        dynamic_entries: dynamic_entries as u32,
+        width: width as u32,
+        ptp: ptp != 0,
+        rss: rss != 0,
+        rss_queues: rss_queues as u32,
+        int: int_enabled != 0,
+        int_switch_id: int_switch_id as u32,
     })
 }
 
@@ -1442,6 +1681,17 @@ mod tests {
                 counters_enabled: false,
                 rate_limit_enabled: false,
                 conntrack_enabled: false,
+                axi_enabled: false,
+                ports: 1,
+                target: "standalone".to_string(),
+                dynamic: false,
+                dynamic_entries: 16,
+                width: 8,
+                ptp: false,
+                rss: false,
+                rss_queues: 4,
+                int: false,
+                int_switch_id: 0,
             })
             .unwrap();
         storage
@@ -1596,6 +1846,17 @@ mod tests {
                     counters_enabled: false,
                     rate_limit_enabled: false,
                     conntrack_enabled: false,
+                    axi_enabled: false,
+                    ports: 1,
+                    target: "standalone".to_string(),
+                    dynamic: false,
+                    dynamic_entries: 16,
+                    width: 8,
+                    ptp: false,
+                    rss: false,
+                    rss_queues: 4,
+                    int: false,
+                    int_switch_id: 0,
                 })
                 .unwrap();
             assert_eq!(v, i);

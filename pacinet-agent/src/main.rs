@@ -116,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             detected
         }
     };
+    let capabilities = detect_pacgate_capabilities();
 
     info!(
         controller = %args.controller,
@@ -131,6 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &agent_address,
         &labels,
         &pacgate_version,
+        &capabilities,
         &tls_config,
     )
     .await?;
@@ -148,6 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         deployed_at: None,
         start_time: tokio::time::Instant::now(),
         counters: vec![],
+        flow_counters: vec![],
         pacgate_version: pacgate_version_clone,
     }));
 
@@ -239,6 +242,7 @@ async fn register_with_controller(
     agent_address: &str,
     labels: &std::collections::HashMap<String, String>,
     pacgate_version: &str,
+    capabilities: &std::collections::HashMap<String, String>,
     tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut client = connect_to_controller(controller_addr, tls_config)
@@ -251,6 +255,7 @@ async fn register_with_controller(
             agent_address: agent_address.to_string(),
             labels: labels.clone(),
             pacgate_version: pacgate_version.to_string(),
+            capabilities: capabilities.clone(),
         })
         .await?;
 
@@ -382,4 +387,23 @@ fn gethostname() -> Option<String> {
     std::fs::read_to_string("/etc/hostname")
         .ok()
         .map(|s| s.trim().to_string())
+}
+
+fn detect_pacgate_capabilities() -> std::collections::HashMap<String, String> {
+    // Static declaration for now; pacinet can hard-gate on these.
+    std::collections::HashMap::from([
+        ("compile.axi".to_string(), "true".to_string()),
+        ("compile.ports".to_string(), "true".to_string()),
+        ("compile.target".to_string(), "true".to_string()),
+        ("compile.dynamic".to_string(), "true".to_string()),
+        ("compile.width".to_string(), "true".to_string()),
+        ("compile.ptp".to_string(), "true".to_string()),
+        ("compile.rss".to_string(), "true".to_string()),
+        ("compile.rss_queues".to_string(), "true".to_string()),
+        ("compile.int".to_string(), "true".to_string()),
+        ("compile.int_switch_id".to_string(), "true".to_string()),
+        ("telemetry.flow_counters".to_string(), "true".to_string()),
+        ("scenario.regress".to_string(), "true".to_string()),
+        ("scenario.topology".to_string(), "true".to_string()),
+    ])
 }

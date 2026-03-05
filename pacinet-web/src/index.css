@@ -1,36 +1,37 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 :root {
-  --bg-primary: #0f1117;
-  --bg-secondary: #1a1b26;
-  --bg-tertiary: #24253a;
-  --bg-elevated: #2a2b3d;
-  --border-default: #2e2f3e;
-  --border-hover: #3e3f52;
-  --text-primary: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --accent: #6366f1;
-  --accent-hover: #818cf8;
+  --bg-primary: #0b1320;
+  --bg-secondary: #121c2b;
+  --bg-tertiary: #192536;
+  --bg-elevated: #1d2b3f;
+  --border-default: #2a3b53;
+  --border-hover: #37506f;
+  --text-primary: #e7eef9;
+  --text-secondary: #a7b7cd;
+  --text-muted: #73839a;
+  --accent: #14a7bd;
+  --accent-hover: #0ec5d8;
 }
 
 :root.light {
-  --bg-primary: #ffffff;
-  --bg-secondary: #f8fafc;
-  --bg-tertiary: #f1f5f9;
+  --bg-primary: #f3f6fb;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #eef2f8;
   --bg-elevated: #ffffff;
-  --border-default: #e2e8f0;
-  --border-hover: #cbd5e1;
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #94a3b8;
-  --accent: #6366f1;
-  --accent-hover: #4f46e5;
+  --border-default: #d8e0ec;
+  --border-hover: #c0ccde;
+  --text-primary: #102036;
+  --text-secondary: #405672;
+  --text-muted: #6f8099;
+  --accent: #0d8fa6;
+  --accent-hover: #0aa8be;
 }
 
 @theme {
-  --font-sans: 'Inter', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: 'Manrope', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
   --color-surface: var(--bg-primary);
   --color-surface-alt: var(--bg-secondary);
   --color-surface-hover: var(--bg-tertiary);
@@ -53,7 +54,7 @@ body {
   margin: 0;
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'Manrope', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -74,4 +75,22 @@ body {
 
 .animate-fade-in {
   animation: fade-in 0.15s ease-out;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--border-default) 82%, transparent);
+  border-radius: 999px;
+}
+
+:root.density-compact {
+  font-size: 14px;
 }

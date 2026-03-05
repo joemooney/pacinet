@@ -17,11 +17,7 @@ pub struct LeaderElection {
 }
 
 impl LeaderElection {
-    pub fn new(
-        controller_id: String,
-        lease_duration: Duration,
-        storage: Arc<dyn Storage>,
-    ) -> Self {
+    pub fn new(controller_id: String, lease_duration: Duration, storage: Arc<dyn Storage>) -> Self {
         Self {
             controller_id,
             lease_duration,

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pacinet_core::Storage;
+use pacinet_proto::*;
 use pacinet_server::config::ControllerConfig;
 use pacinet_server::counter_cache::CounterSnapshotCache;
 use pacinet_server::events::EventBus;
@@ -14,7 +15,6 @@ use pacinet_server::fsm_engine::FsmEngine;
 use pacinet_server::rest::{self, AppState};
 use pacinet_server::service::{ControllerService, ManagementService};
 use pacinet_server::storage::MemoryStorage;
-use pacinet_proto::*;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 
@@ -31,13 +31,8 @@ async fn start_rest_server(
     ));
     let event_bus = EventBus::new(256);
     let fsm_engine = Arc::new(
-        FsmEngine::new(
-            storage.clone(),
-            config.clone(),
-            None,
-            counter_cache.clone(),
-        )
-        .with_event_bus(event_bus.clone()),
+        FsmEngine::new(storage.clone(), config.clone(), None, counter_cache.clone())
+            .with_event_bus(event_bus.clone()),
     );
 
     // Start gRPC server
@@ -96,16 +91,16 @@ async fn register_node_grpc(
     labels: HashMap<String, String>,
 ) -> String {
     let addr = format!("http://127.0.0.1:{}", grpc_port);
-    let mut client =
-        paci_net_controller_client::PaciNetControllerClient::connect(addr)
-            .await
-            .unwrap();
+    let mut client = paci_net_controller_client::PaciNetControllerClient::connect(addr)
+        .await
+        .unwrap();
     let resp = client
         .register_node(RegisterNodeRequest {
             hostname: hostname.to_string(),
             agent_address: format!("127.0.0.1:{}", grpc_port + 1000),
             labels,
             pacgate_version: "0.1.0-test".to_string(),
+            capabilities: HashMap::new(),
         })
         .await
         .unwrap()
@@ -251,10 +246,7 @@ async fn test_rest_fleet_status() {
 
     // Non-matching label
     let resp = client
-        .get(format!(
-            "{}/api/fleet?label=env%3Ddev",
-            base_url(rest_port)
-        ))
+        .get(format!("{}/api/fleet?label=env%3Ddev", base_url(rest_port)))
         .send()
         .await
         .unwrap();
@@ -468,8 +460,7 @@ async fn test_rest_health() {
 #[tokio::test]
 async fn test_rest_auth_required() {
     let storage = Arc::new(MemoryStorage::new());
-    let (_, rest_port, _) =
-        start_rest_server(storage, Some("test-secret-key".to_string())).await;
+    let (_, rest_port, _) = start_rest_server(storage, Some("test-secret-key".to_string())).await;
 
     let client = reqwest::Client::new();
 
@@ -513,8 +504,7 @@ async fn test_rest_auth_required() {
 #[tokio::test]
 async fn test_rest_auth_token_query_param() {
     let storage = Arc::new(MemoryStorage::new());
-    let (_, rest_port, _) =
-        start_rest_server(storage, Some("my-api-key".to_string())).await;
+    let (_, rest_port, _) = start_rest_server(storage, Some("my-api-key".to_string())).await;
 
     let client = reqwest::Client::new();
 
@@ -531,10 +521,7 @@ async fn test_rest_auth_token_query_param() {
 
     // With wrong ?token=
     let resp = client
-        .get(format!(
-            "{}/api/nodes?token=wrong",
-            base_url(rest_port)
-        ))
+        .get(format!("{}/api/nodes?token=wrong", base_url(rest_port)))
         .send()
         .await
         .unwrap();
@@ -596,11 +583,7 @@ async fn test_rest_sse_node_events() {
     });
 
     // Read the chunked response with timeout
-    let body = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        resp.text(),
-    )
-    .await;
+    let body = tokio::time::timeout(std::time::Duration::from_secs(2), resp.text()).await;
 
     // The SSE connection stays open, so timeout is expected.
     // If we got data before timeout, check it contains our event.
@@ -727,7 +710,11 @@ async fn test_rest_node_annotations() {
 
     // Set annotations
     let resp = client
-        .put(format!("{}/api/nodes/{}/annotations", base_url(rest_port), node_id))
+        .put(format!(
+            "{}/api/nodes/{}/annotations",
+            base_url(rest_port),
+            node_id
+        ))
         .json(&serde_json::json!({
             "annotations": {"env": "prod", "ticket": "JIRA-123"},
             "remove_keys": []
@@ -751,7 +738,11 @@ async fn test_rest_node_annotations() {
 
     // Remove an annotation
     let resp = client
-        .put(format!("{}/api/nodes/{}/annotations", base_url(rest_port), node_id))
+        .put(format!(
+            "{}/api/nodes/{}/annotations",
+            base_url(rest_port),
+            node_id
+        ))
         .json(&serde_json::json!({
             "annotations": {},
             "remove_keys": ["ticket"]
@@ -814,7 +805,10 @@ async fn test_rest_audit_log() {
 
     // Filter by action
     let resp = client
-        .get(format!("{}/api/audit?action=deploy&limit=10", base_url(rest_port)))
+        .get(format!(
+            "{}/api/audit?action=deploy&limit=10",
+            base_url(rest_port)
+        ))
         .send()
         .await
         .unwrap();
@@ -864,7 +858,10 @@ async fn test_rest_templates_crud() {
 
     // Get single template
     let resp = client
-        .get(format!("{}/api/templates/base-firewall", base_url(rest_port)))
+        .get(format!(
+            "{}/api/templates/base-firewall",
+            base_url(rest_port)
+        ))
         .send()
         .await
         .unwrap();
@@ -876,7 +873,10 @@ async fn test_rest_templates_crud() {
 
     // Filter by tag
     let resp = client
-        .get(format!("{}/api/templates?tag=production", base_url(rest_port)))
+        .get(format!(
+            "{}/api/templates?tag=production",
+            base_url(rest_port)
+        ))
         .send()
         .await
         .unwrap();
@@ -884,7 +884,10 @@ async fn test_rest_templates_crud() {
     assert_eq!(templates.len(), 1);
 
     let resp = client
-        .get(format!("{}/api/templates?tag=nonexistent", base_url(rest_port)))
+        .get(format!(
+            "{}/api/templates?tag=nonexistent",
+            base_url(rest_port)
+        ))
         .send()
         .await
         .unwrap();
@@ -893,7 +896,10 @@ async fn test_rest_templates_crud() {
 
     // Delete template
     let resp = client
-        .delete(format!("{}/api/templates/base-firewall", base_url(rest_port)))
+        .delete(format!(
+            "{}/api/templates/base-firewall",
+            base_url(rest_port)
+        ))
         .send()
         .await
         .unwrap();
@@ -971,7 +977,10 @@ async fn test_rest_webhook_history_empty() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/api/webhooks/history?limit=10", base_url(rest_port)))
+        .get(format!(
+            "{}/api/webhooks/history?limit=10",
+            base_url(rest_port)
+        ))
         .send()
         .await
         .unwrap();

@@ -81,6 +81,17 @@ export function useStartFsm() {
       counters?: boolean;
       rate_limit?: boolean;
       conntrack?: boolean;
+      axi?: boolean;
+      ports?: number;
+      target?: string;
+      dynamic?: boolean;
+      dynamic_entries?: number;
+      width?: number;
+      ptp?: boolean;
+      rss?: boolean;
+      rss_queues?: number;
+      int?: boolean;
+      int_switch_id?: number;
       target_label_filter?: Record<string, string>;
     }) =>
       apiFetch<StartFsmResponse>('/api/fsm/instances', {

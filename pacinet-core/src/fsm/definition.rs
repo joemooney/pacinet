@@ -171,6 +171,48 @@ pub struct CompileOptions {
     pub rate_limit: bool,
     #[serde(default)]
     pub conntrack: bool,
+    #[serde(default)]
+    pub axi: bool,
+    #[serde(default = "default_ports")]
+    pub ports: u32,
+    #[serde(default = "default_target")]
+    pub target: String,
+    #[serde(default)]
+    pub dynamic: bool,
+    #[serde(default = "default_dynamic_entries")]
+    pub dynamic_entries: u32,
+    #[serde(default = "default_width")]
+    pub width: u32,
+    #[serde(default)]
+    pub ptp: bool,
+    #[serde(default)]
+    pub rss: bool,
+    #[serde(default = "default_rss_queues")]
+    pub rss_queues: u32,
+    #[serde(default)]
+    pub int: bool,
+    #[serde(default)]
+    pub int_switch_id: u32,
+}
+
+fn default_ports() -> u32 {
+    1
+}
+
+fn default_target() -> String {
+    "standalone".to_string()
+}
+
+fn default_dynamic_entries() -> u32 {
+    16
+}
+
+fn default_width() -> u32 {
+    8
+}
+
+fn default_rss_queues() -> u32 {
+    4
 }
 
 /// Rollback action.
@@ -516,7 +558,10 @@ states:
     fn test_fsm_kind_display_roundtrip() {
         assert_eq!(FsmKind::Deployment.to_string(), "deployment");
         assert_eq!(FsmKind::AdaptivePolicy.to_string(), "adaptive_policy");
-        assert_eq!("deployment".parse::<FsmKind>().unwrap(), FsmKind::Deployment);
+        assert_eq!(
+            "deployment".parse::<FsmKind>().unwrap(),
+            FsmKind::Deployment
+        );
     }
 
     #[test]

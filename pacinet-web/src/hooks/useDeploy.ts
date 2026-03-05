@@ -8,6 +8,17 @@ interface DeployParams {
   counters: boolean;
   rate_limit: boolean;
   conntrack: boolean;
+  axi: boolean;
+  ports: number;
+  target: string;
+  dynamic: boolean;
+  dynamic_entries: number;
+  width: number;
+  ptp: boolean;
+  rss: boolean;
+  rss_queues: number;
+  int: boolean;
+  int_switch_id: number;
 }
 
 interface BatchDeployParams {
@@ -16,6 +27,17 @@ interface BatchDeployParams {
   counters: boolean;
   rate_limit: boolean;
   conntrack: boolean;
+  axi: boolean;
+  ports: number;
+  target: string;
+  dynamic: boolean;
+  dynamic_entries: number;
+  width: number;
+  ptp: boolean;
+  rss: boolean;
+  rss_queues: number;
+  int: boolean;
+  int_switch_id: number;
 }
 
 export function useDeployPolicy() {

@@ -55,9 +55,7 @@ impl From<PaciNetError> for tonic::Status {
                 FsmError::InstanceNotFound(_) | FsmError::DefinitionNotFound(_) => {
                     tonic::Status::not_found(err.to_string())
                 }
-                FsmError::AlreadyCompleted => {
-                    tonic::Status::failed_precondition(err.to_string())
-                }
+                FsmError::AlreadyCompleted => tonic::Status::failed_precondition(err.to_string()),
                 FsmError::InvalidDefinition(_) | FsmError::YamlParse(_) => {
                     tonic::Status::invalid_argument(err.to_string())
                 }

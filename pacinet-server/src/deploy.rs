@@ -27,6 +27,17 @@ pub async fn deploy_to_node(
     deploy_timeout: std::time::Duration,
     tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) -> DeployOutcome {
+    let options = normalize_options(options);
+    if let Err(msg) = ensure_node_capabilities(node, &options) {
+        return DeployOutcome {
+            success: false,
+            message: msg,
+            warnings: vec![],
+            result: DeploymentResult::AgentFailure,
+            version: 0,
+        };
+    }
+
     let deploy_start = tokio::time::Instant::now();
     let policy_hash = pacinet_core::policy_hash(rules_yaml);
 
@@ -39,6 +50,17 @@ pub async fn deploy_to_node(
         counters_enabled: options.counters,
         rate_limit_enabled: options.rate_limit,
         conntrack_enabled: options.conntrack,
+        axi_enabled: options.axi,
+        ports: options.ports,
+        target: options.target.clone(),
+        dynamic: options.dynamic,
+        dynamic_entries: options.dynamic_entries,
+        width: options.width,
+        ptp: options.ptp,
+        rss: options.rss,
+        rss_queues: options.rss_queues,
+        int: options.int_enabled,
+        int_switch_id: options.int_switch_id,
     };
     let node_id = node.node_id.clone();
     let policy_clone = policy.clone();
@@ -73,12 +95,7 @@ pub async fn deploy_to_node(
 
     let agent_result = tokio::time::timeout(
         deploy_timeout,
-        forward_deploy_to_agent(
-            &agent_addr,
-            rules_yaml,
-            Some(options),
-            tls_config,
-        ),
+        forward_deploy_to_agent(&agent_addr, rules_yaml, Some(options), tls_config),
     )
     .await;
 
@@ -91,7 +108,11 @@ pub async fn deploy_to_node(
                 })
                 .await;
                 info!(node_id = %node.node_id, "Policy deployed successfully to agent");
-                (response.message, response.warnings, DeploymentResult::Success)
+                (
+                    response.message,
+                    response.warnings,
+                    DeploymentResult::Success,
+                )
             } else {
                 let nid = node.node_id.clone();
                 let _ = blocking(storage, move |s| {
@@ -99,7 +120,11 @@ pub async fn deploy_to_node(
                 })
                 .await;
                 warn!(node_id = %node.node_id, msg = %response.message, "Agent deploy failed");
-                (response.message, response.warnings, DeploymentResult::AgentFailure)
+                (
+                    response.message,
+                    response.warnings,
+                    DeploymentResult::AgentFailure,
+                )
             }
         }
         Ok(Err(e)) => {
@@ -156,6 +181,99 @@ pub async fn deploy_to_node(
     }
 }
 
+fn ensure_node_capabilities(node: &Node, options: &CompileOptions) -> Result<(), String> {
+    if options.axi && !capability_true(node, "compile.axi") {
+        return Err(format!(
+            "Node '{}' does not advertise compile.axi capability",
+            node.node_id
+        ));
+    }
+    if options.ports > 1 && !capability_true(node, "compile.ports") {
+        return Err(format!(
+            "Node '{}' does not advertise compile.ports capability",
+            node.node_id
+        ));
+    }
+    if options.dynamic && !capability_true(node, "compile.dynamic") {
+        return Err(format!(
+            "Node '{}' does not advertise compile.dynamic capability",
+            node.node_id
+        ));
+    }
+    if options.width > 8 && !capability_true(node, "compile.width") {
+        return Err(format!(
+            "Node '{}' does not advertise compile.width capability",
+            node.node_id
+        ));
+    }
+    if !options.target.is_empty()
+        && options.target != "standalone"
+        && !capability_true(node, "compile.target")
+    {
+        return Err(format!(
+            "Node '{}' does not advertise compile.target capability",
+            node.node_id
+        ));
+    }
+    if options.ptp && !capability_true(node, "compile.ptp") {
+        return Err(format!(
+            "Node '{}' does not advertise compile.ptp capability",
+            node.node_id
+        ));
+    }
+    if options.rss && !capability_true(node, "compile.rss") {
+        return Err(format!(
+            "Node '{}' does not advertise compile.rss capability",
+            node.node_id
+        ));
+    }
+    if options.rss_queues != 4 && !capability_true(node, "compile.rss_queues") {
+        return Err(format!(
+            "Node '{}' does not advertise compile.rss_queues capability",
+            node.node_id
+        ));
+    }
+    if options.int_enabled && !capability_true(node, "compile.int") {
+        return Err(format!(
+            "Node '{}' does not advertise compile.int capability",
+            node.node_id
+        ));
+    }
+    if options.int_switch_id != 0 && !capability_true(node, "compile.int_switch_id") {
+        return Err(format!(
+            "Node '{}' does not advertise compile.int_switch_id capability",
+            node.node_id
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_options(mut options: CompileOptions) -> CompileOptions {
+    if options.ports == 0 {
+        options.ports = 1;
+    }
+    if options.dynamic_entries == 0 {
+        options.dynamic_entries = 16;
+    }
+    if options.width == 0 {
+        options.width = 8;
+    }
+    if options.rss_queues == 0 {
+        options.rss_queues = 4;
+    }
+    if options.target.is_empty() {
+        options.target = "standalone".to_string();
+    }
+    options
+}
+
+fn capability_true(node: &Node, key: &str) -> bool {
+    node.capabilities
+        .get(key)
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Deploy to multiple nodes, collecting results into an ActionResult.
 pub async fn deploy_to_nodes(
     storage: &Arc<dyn Storage>,
@@ -173,7 +291,9 @@ pub async fn deploy_to_nodes(
     for node in &nodes {
         // Try acquire deploy guard
         let nid = node.node_id.clone();
-        let guard_ok = blocking(storage, move |s| s.begin_deploy(&nid)).await.is_ok();
+        let guard_ok = blocking(storage, move |s| s.begin_deploy(&nid))
+            .await
+            .is_ok();
         if !guard_ok {
             failed += 1;
             node_results.push(NodeActionResult {
@@ -188,7 +308,7 @@ pub async fn deploy_to_nodes(
             storage,
             node,
             rules_yaml,
-            options,
+            options.clone(),
             deploy_timeout,
             tls_config,
         )

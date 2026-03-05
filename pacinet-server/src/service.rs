@@ -63,12 +63,14 @@ impl paci_net_controller_server::PaciNetController for ControllerService {
 
         let hostname = req.hostname.clone();
         let labels = req.labels.clone();
-        let node = Node::new(
+        let capabilities = req.capabilities.clone();
+        let mut node = Node::new(
             req.hostname,
             req.agent_address,
             req.labels,
             req.pacgate_version,
         );
+        node.capabilities = capabilities;
         let node_id = blocking(&self.storage, move |s| s.register_node(node)).await?;
 
         info!(node_id = %node_id, "Node registered successfully");
@@ -148,14 +150,20 @@ impl paci_net_controller_server::PaciNetController for ControllerService {
         request: Request<ReportCountersRequest>,
     ) -> Result<Response<ReportCountersResponse>, Status> {
         let req = request.into_inner();
-        let node_id = req.node_id.clone();
+        let ReportCountersRequest {
+            node_id,
+            counters,
+            collected_at,
+            flow_counters,
+        } = req;
         let counters: Vec<pacinet_core::RuleCounter> =
-            req.counters.into_iter().map(|c| c.into()).collect();
+            counters.into_iter().map(|c| c.into()).collect();
+        let flow_counters: Vec<pacinet_core::FlowCounter> =
+            flow_counters.into_iter().map(|c| c.into()).collect();
 
         // Record snapshot in counter cache for rate tracking
         if let Some(ref cache) = self.counter_cache {
-            let collected_at = req
-                .collected_at
+            let collected_at = collected_at
                 .as_ref()
                 .and_then(|t| chrono::DateTime::from_timestamp(t.seconds, 0))
                 .unwrap_or_else(chrono::Utc::now);
@@ -176,8 +184,7 @@ impl paci_net_controller_server::PaciNetController for ControllerService {
                     counters
                         .iter()
                         .map(|c| {
-                            let rate =
-                                counter_rate::calculate_rate(&older, &newer, &c.rule_name);
+                            let rate = counter_rate::calculate_rate(&older, &newer, &c.rule_name);
                             CounterRateData {
                                 rule_name: c.rule_name.clone(),
                                 match_count: c.match_count,
@@ -214,7 +221,16 @@ impl paci_net_controller_server::PaciNetController for ControllerService {
             }
         }
 
-        blocking(&self.storage, move |s| s.store_counters(&node_id, counters)).await?;
+        let counters_node_id = node_id.clone();
+        blocking(&self.storage, move |s| {
+            s.store_counters(&counters_node_id, counters)
+        })
+        .await?;
+        let flow_node_id = node_id.clone();
+        blocking(&self.storage, move |s| {
+            s.store_flow_counters(&flow_node_id, flow_counters)
+        })
+        .await?;
 
         Ok(Response::new(ReportCountersResponse { acknowledged: true }))
     }
@@ -267,6 +283,7 @@ fn node_to_proto(node: &Node, policy: Option<&Policy>) -> NodeInfo {
         hostname: node.hostname.clone(),
         agent_address: node.agent_address.clone(),
         labels: node.labels.clone(),
+        capabilities: node.capabilities.clone(),
         state: pacinet_proto::NodeState::from(node.state.clone()) as i32,
         registered_at: Some(prost_types::Timestamp {
             seconds: node.registered_at.timestamp(),
@@ -496,7 +513,7 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
         for node in nodes {
             let storage = self.storage.clone();
             let rules_yaml = req.rules_yaml.clone();
-            let options = req.options;
+            let options = req.options.clone();
             let deploy_timeout = self.config.deploy_timeout;
             let tls = self.tls_config.clone();
 
@@ -711,6 +728,17 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
             counters: target.counters_enabled,
             rate_limit: target.rate_limit_enabled,
             conntrack: target.conntrack_enabled,
+            axi: target.axi_enabled,
+            ports: target.ports,
+            target: target.target.clone(),
+            dynamic: target.dynamic,
+            dynamic_entries: target.dynamic_entries,
+            width: target.width,
+            ptp: target.ptp,
+            rss: target.rss,
+            rss_queues: target.rss_queues,
+            int_enabled: target.int,
+            int_switch_id: target.int_switch_id,
         });
 
         // Deploy the rollback via existing deploy flow
@@ -1007,6 +1035,17 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
             counters: o.counters,
             rate_limit: o.rate_limit,
             conntrack: o.conntrack,
+            axi: o.axi,
+            ports: o.ports,
+            target: o.target,
+            dynamic: o.dynamic,
+            dynamic_entries: o.dynamic_entries,
+            width: o.width,
+            ptp: o.ptp,
+            rss: o.rss,
+            rss_queues: o.rss_queues,
+            int: o.int_enabled,
+            int_switch_id: o.int_switch_id,
         });
 
         // If target_label_filter is provided, start as adaptive policy FSM
@@ -1605,7 +1644,7 @@ impl ManagementService {
         req: &DeployPolicyRequest,
         node: &Node,
     ) -> Result<Response<DeployPolicyResponse>, Status> {
-        let options = req.options.unwrap_or_default();
+        let options = req.options.clone().unwrap_or_default();
         let outcome = crate::deploy::deploy_to_node(
             &self.storage,
             node,
@@ -1637,7 +1676,7 @@ async fn deploy_single_node(
     let node_id = req.node_id.clone();
     blocking(storage, move |s| s.begin_deploy(&node_id)).await?;
 
-    let options = req.options.unwrap_or_default();
+    let options = req.options.clone().unwrap_or_default();
     let outcome = crate::deploy::deploy_to_node(
         storage,
         node,

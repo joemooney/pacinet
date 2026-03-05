@@ -149,12 +149,7 @@ impl FsmInstance {
     }
 
     /// Record a state transition.
-    pub fn transition(
-        &mut self,
-        to_state: String,
-        trigger: TransitionTrigger,
-        message: String,
-    ) {
+    pub fn transition(&mut self, to_state: String, trigger: TransitionTrigger, message: String) {
         let now = Utc::now();
         self.history.push(FsmTransitionRecord {
             from_state: self.current_state.clone(),
@@ -175,10 +170,7 @@ impl FsmInstance {
 
 impl FsmContext {
     /// Create a new context for a deployment FSM.
-    pub fn for_deployment(
-        rules_yaml: String,
-        compile_options: Option<CompileOptions>,
-    ) -> Self {
+    pub fn for_deployment(rules_yaml: String, compile_options: Option<CompileOptions>) -> Self {
         Self {
             rules_yaml: Some(rules_yaml),
             policy_hash: None,

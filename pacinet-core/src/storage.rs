@@ -50,6 +50,20 @@ pub trait Storage: Send + Sync {
     /// Get counters for a node.
     fn get_counters(&self, node_id: &str) -> Result<Option<Vec<RuleCounter>>, PaciNetError>;
 
+    /// Store exported per-flow counters for a node (replaces previous snapshot).
+    fn store_flow_counters(
+        &self,
+        _node_id: &str,
+        _counters: Vec<FlowCounter>,
+    ) -> Result<(), PaciNetError> {
+        Ok(())
+    }
+
+    /// Get exported per-flow counters for a node.
+    fn get_flow_counters(&self, _node_id: &str) -> Result<Option<Vec<FlowCounter>>, PaciNetError> {
+        Ok(None)
+    }
+
     // ---- Policy operations (with versioning) ----
 
     /// Store a policy. Returns the version number.

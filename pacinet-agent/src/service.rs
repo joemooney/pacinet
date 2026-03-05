@@ -14,6 +14,7 @@ pub struct AgentState {
     pub deployed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub start_time: tokio::time::Instant,
     pub counters: Vec<RuleCounter>,
+    pub flow_counters: Vec<FlowCounter>,
     pub pacgate_version: String,
 }
 
@@ -45,15 +46,7 @@ impl paci_net_agent_server::PaciNetAgent for AgentService {
         // Compile with PacGate backend (takes read lock only for compile)
         let compile_result = {
             let state = self.state.read().await;
-            state
-                .pacgate
-                .compile(
-                    &req.rules_yaml,
-                    options.counters,
-                    options.rate_limit,
-                    options.conntrack,
-                )
-                .await
+            state.pacgate.compile(&req.rules_yaml, &options).await
         };
 
         match compile_result {
@@ -97,6 +90,7 @@ impl paci_net_agent_server::PaciNetAgent for AgentService {
                 seconds: chrono::Utc::now().timestamp(),
                 nanos: 0,
             }),
+            flow_counters: state.flow_counters.clone(),
         }))
     }
 

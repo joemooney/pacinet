@@ -10,6 +10,7 @@ import FsmPage from './components/fsm/FsmPage';
 import WatchPage from './components/watch/WatchPage';
 import AuditPage from './components/audit/AuditPage';
 import TemplatesPage from './components/templates/TemplatesPage';
+import WallboardPage from './components/wallboard/WallboardPage';
 import ApiKeyPrompt from './components/auth/ApiKeyPrompt';
 
 export default function App() {
@@ -39,6 +40,7 @@ export default function App() {
         />
       )}
       <Routes>
+        <Route path="/wallboard" element={<WallboardPage />} />
         <Route element={<AppLayout />}>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/nodes" element={<NodesPage />} />

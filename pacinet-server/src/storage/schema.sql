@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     hostname TEXT NOT NULL,
     agent_address TEXT NOT NULL,
     labels TEXT NOT NULL DEFAULT '{}',  -- JSON
+    capabilities TEXT NOT NULL DEFAULT '{}',  -- JSON
     state TEXT NOT NULL DEFAULT 'registered',
     registered_at TEXT NOT NULL,
     last_heartbeat TEXT NOT NULL,
@@ -29,7 +30,18 @@ CREATE TABLE IF NOT EXISTS policies (
     deployed_at TEXT NOT NULL,
     counters_enabled INTEGER NOT NULL DEFAULT 0,
     rate_limit_enabled INTEGER NOT NULL DEFAULT 0,
-    conntrack_enabled INTEGER NOT NULL DEFAULT 0
+    conntrack_enabled INTEGER NOT NULL DEFAULT 0,
+    axi_enabled INTEGER NOT NULL DEFAULT 0,
+    ports INTEGER NOT NULL DEFAULT 1,
+    target TEXT NOT NULL DEFAULT 'standalone',
+    dynamic INTEGER NOT NULL DEFAULT 0,
+    dynamic_entries INTEGER NOT NULL DEFAULT 16,
+    width INTEGER NOT NULL DEFAULT 8,
+    ptp INTEGER NOT NULL DEFAULT 0,
+    rss INTEGER NOT NULL DEFAULT 0,
+    rss_queues INTEGER NOT NULL DEFAULT 4,
+    int_enabled INTEGER NOT NULL DEFAULT 0,
+    int_switch_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS policy_versions (
@@ -41,7 +53,18 @@ CREATE TABLE IF NOT EXISTS policy_versions (
     deployed_at TEXT NOT NULL,
     counters_enabled INTEGER NOT NULL DEFAULT 0,
     rate_limit_enabled INTEGER NOT NULL DEFAULT 0,
-    conntrack_enabled INTEGER NOT NULL DEFAULT 0
+    conntrack_enabled INTEGER NOT NULL DEFAULT 0,
+    axi_enabled INTEGER NOT NULL DEFAULT 0,
+    ports INTEGER NOT NULL DEFAULT 1,
+    target TEXT NOT NULL DEFAULT 'standalone',
+    dynamic INTEGER NOT NULL DEFAULT 0,
+    dynamic_entries INTEGER NOT NULL DEFAULT 16,
+    width INTEGER NOT NULL DEFAULT 8,
+    ptp INTEGER NOT NULL DEFAULT 0,
+    rss INTEGER NOT NULL DEFAULT 0,
+    rss_queues INTEGER NOT NULL DEFAULT 4,
+    int_enabled INTEGER NOT NULL DEFAULT 0,
+    int_switch_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_policy_versions_node ON policy_versions(node_id, version DESC);
@@ -49,6 +72,11 @@ CREATE INDEX IF NOT EXISTS idx_policy_versions_node ON policy_versions(node_id, 
 CREATE TABLE IF NOT EXISTS counters (
     node_id TEXT PRIMARY KEY REFERENCES nodes(node_id) ON DELETE CASCADE,
     data TEXT NOT NULL  -- JSON array of RuleCounter
+);
+
+CREATE TABLE IF NOT EXISTS flow_counters (
+    node_id TEXT PRIMARY KEY REFERENCES nodes(node_id) ON DELETE CASCADE,
+    data TEXT NOT NULL  -- JSON array of FlowCounter
 );
 
 CREATE TABLE IF NOT EXISTS deployments (

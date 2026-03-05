@@ -63,6 +63,7 @@ async fn start_agent(backend: PacGateBackend) -> (u16, Arc<RwLock<AgentState>>) 
         deployed_at: None,
         start_time: tokio::time::Instant::now(),
         counters: vec![],
+        flow_counters: vec![],
         pacgate_version: "0.1.0".to_string(),
     }));
 
@@ -100,6 +101,7 @@ async fn register_node(
             agent_address: agent_address.to_string(),
             labels,
             pacgate_version: "0.1.0".to_string(),
+            capabilities: HashMap::new(),
         })
         .await
         .unwrap()
@@ -110,19 +112,14 @@ async fn register_node(
 }
 
 /// Start the controller with FSM engine enabled. Returns the port and counter cache.
-async fn start_controller_with_fsm(
-    storage: Arc<dyn Storage>,
-) -> (u16, Arc<CounterSnapshotCache>) {
+async fn start_controller_with_fsm(storage: Arc<dyn Storage>) -> (u16, Arc<CounterSnapshotCache>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    let counter_cache = Arc::new(CounterSnapshotCache::new(
-        chrono::Duration::hours(1),
-        120,
-    ));
+    let counter_cache = Arc::new(CounterSnapshotCache::new(chrono::Duration::hours(1), 120));
 
-    let controller_service = ControllerService::new(storage.clone())
-        .with_counter_cache(counter_cache.clone());
+    let controller_service =
+        ControllerService::new(storage.clone()).with_counter_cache(counter_cache.clone());
     let config = ControllerConfig::default();
     let fsm_engine = Arc::new(FsmEngine::new(
         storage.clone(),
@@ -138,8 +135,8 @@ async fn start_controller_with_fsm(
         engine_clone.run(shutdown_rx).await;
     });
 
-    let management_service = ManagementService::new(storage.clone(), config)
-        .with_fsm_engine(fsm_engine);
+    let management_service =
+        ManagementService::new(storage.clone(), config).with_fsm_engine(fsm_engine);
 
     tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -208,6 +205,17 @@ async fn test_register_deploy_counters_flow() {
                 counters: true,
                 rate_limit: false,
                 conntrack: false,
+                axi: false,
+                ports: 1,
+                target: "standalone".to_string(),
+                dynamic: false,
+                dynamic_entries: 16,
+                width: 8,
+                ptp: false,
+                rss: false,
+                rss_queues: 4,
+                int_enabled: false,
+                int_switch_id: 0,
             }),
             dry_run: false,
         })
@@ -256,6 +264,7 @@ async fn test_register_deploy_counters_flow() {
                 seconds: chrono::Utc::now().timestamp(),
                 nanos: 0,
             }),
+            flow_counters: vec![],
         })
         .await
         .unwrap()
@@ -449,6 +458,17 @@ async fn test_batch_deploy_to_multiple_nodes() {
                 counters: true,
                 rate_limit: false,
                 conntrack: false,
+                axi: false,
+                ports: 1,
+                target: "standalone".to_string(),
+                dynamic: false,
+                dynamic_entries: 16,
+                width: 8,
+                ptp: false,
+                rss: false,
+                rss_queues: 4,
+                int_enabled: false,
+                int_switch_id: 0,
             }),
             dry_run: false,
         })
@@ -682,10 +702,9 @@ async fn test_fsm_definition_crud() {
     let (ctrl_port, _counter_cache) = start_controller_with_fsm(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
 
     // Create
     let resp = mgmt
@@ -763,10 +782,9 @@ async fn test_fsm_start_and_auto_complete() {
         .update_node_state(&node_id, pacinet_core::NodeState::Online)
         .unwrap();
 
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
 
     // Create FSM definition
     mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
@@ -784,6 +802,17 @@ async fn test_fsm_start_and_auto_complete() {
                 counters: true,
                 rate_limit: false,
                 conntrack: false,
+                axi: false,
+                ports: 1,
+                target: "standalone".to_string(),
+                dynamic: false,
+                dynamic_entries: 16,
+                width: 8,
+                ptp: false,
+                rss: false,
+                rss_queues: 4,
+                int_enabled: false,
+                int_switch_id: 0,
             }),
             target_label_filter: HashMap::new(),
         })
@@ -838,10 +867,9 @@ async fn test_fsm_manual_advance() {
         .update_node_state(&node_id, pacinet_core::NodeState::Online)
         .unwrap();
 
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
 
     // Create definition
     mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
@@ -885,7 +913,11 @@ async fn test_fsm_manual_advance() {
         .await
         .unwrap()
         .into_inner();
-    assert!(advance_resp.success, "Advance failed: {}", advance_resp.message);
+    assert!(
+        advance_resp.success,
+        "Advance failed: {}",
+        advance_resp.message
+    );
     assert_eq!(advance_resp.current_state, "approved");
 
     // Wait for FSM engine to mark it completed (terminal state)
@@ -910,10 +942,9 @@ async fn test_fsm_cancel_running_instance() {
     let (ctrl_port, _counter_cache) = start_controller_with_fsm(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
 
     // Create FSM with timer transition (long enough we can cancel)
     mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
@@ -966,10 +997,9 @@ async fn test_fsm_list_instances() {
     let (ctrl_port, _counter_cache) = start_controller_with_fsm(storage.clone()).await;
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
 
     // Create two definitions
     mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
@@ -1058,10 +1088,9 @@ async fn test_fsm_deploy_failure_triggers_transition() {
         .update_node_state(&node_id, pacinet_core::NodeState::Online)
         .unwrap();
 
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
 
     mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
         definition_yaml: SIMPLE_FSM_YAML.to_string(),
@@ -1229,10 +1258,9 @@ async fn test_counter_condition_fires_transition() {
         .update_node_state(&node_id, pacinet_core::NodeState::Online)
         .unwrap();
 
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
 
     // Create counter FSM definition
     mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
@@ -1328,10 +1356,9 @@ async fn test_counter_condition_for_duration() {
         .update_node_state(&node_id, pacinet_core::NodeState::Online)
         .unwrap();
 
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
 
     mgmt.create_fsm_definition(CreateFsmDefinitionRequest {
         definition_yaml: DURATION_FSM_YAML.to_string(),
@@ -1480,10 +1507,9 @@ async fn test_watch_node_events_registration() {
     let ctrl_addr = format!("http://127.0.0.1:{}", ctrl_port);
 
     // Subscribe to node events
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
     let mut stream = mgmt
         .watch_node_events(WatchNodeEventsRequest {
             label_filter: HashMap::new(),
@@ -1511,10 +1537,7 @@ async fn test_watch_node_events_registration() {
         .expect("Stream ended unexpectedly")
         .expect("Error in stream");
 
-    assert_eq!(
-        event.event_type,
-        NodeEventType::NodeEventRegistered as i32
-    );
+    assert_eq!(event.event_type, NodeEventType::NodeEventRegistered as i32);
     assert_eq!(event.hostname, "stream-test-1");
     assert!(!event.node_id.is_empty());
 }
@@ -1536,10 +1559,9 @@ async fn test_watch_counters_report() {
     .await;
 
     // Subscribe to counters filtered by this node
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
     let mut stream = mgmt
         .watch_counters(WatchCountersRequest {
             node_id: node_id.clone(),
@@ -1568,6 +1590,7 @@ async fn test_watch_counters_report() {
                 seconds: chrono::Utc::now().timestamp(),
                 nanos: 0,
             }),
+            flow_counters: vec![],
         })
         .await
         .unwrap();
@@ -1610,10 +1633,9 @@ async fn test_watch_counters_filter() {
     .await;
 
     // Subscribe to counters for node_a only
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
     let mut stream = mgmt
         .watch_counters(WatchCountersRequest {
             node_id: node_a.clone(),
@@ -1642,6 +1664,7 @@ async fn test_watch_counters_filter() {
                 seconds: chrono::Utc::now().timestamp(),
                 nanos: 0,
             }),
+            flow_counters: vec![],
         })
         .await
         .unwrap();
@@ -1659,6 +1682,7 @@ async fn test_watch_counters_filter() {
                 seconds: chrono::Utc::now().timestamp(),
                 nanos: 0,
             }),
+            flow_counters: vec![],
         })
         .await
         .unwrap();
@@ -1702,10 +1726,9 @@ async fn test_watch_fsm_transition() {
         .update_node_state(&node_id, pacinet_core::NodeState::Online)
         .unwrap();
 
-    let mut mgmt =
-        paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
-            .await
-            .unwrap();
+    let mut mgmt = paci_net_management_client::PaciNetManagementClient::connect(ctrl_addr.clone())
+        .await
+        .unwrap();
 
     // Create a simple FSM: start -> deployed (manual) -> done (terminal)
     let def_yaml = r#"
@@ -1769,10 +1792,7 @@ states:
         .expect("Stream ended unexpectedly")
         .expect("Error in stream");
 
-    assert_eq!(
-        event.event_type,
-        FsmEventType::FsmEventTransition as i32
-    );
+    assert_eq!(event.event_type, FsmEventType::FsmEventTransition as i32);
     assert_eq!(event.instance_id, instance_id);
     assert_eq!(event.from_state, "start");
     assert_eq!(event.to_state, "deployed");
