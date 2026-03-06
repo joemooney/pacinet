@@ -26,6 +26,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Pretty-print multiline fields for human readability (overrides strict JSON for some commands)
+    #[arg(long, global = true)]
+    pretty: bool,
+
     /// CA certificate for mTLS
     #[arg(long, global = true)]
     ca_cert: Option<String>,
@@ -446,7 +450,7 @@ async fn main() -> Result<()> {
             .await?
         }
         Commands::Policy { action } => {
-            handle_policy(action, &cli.server, cli.json, &tls_config).await?
+            handle_policy(action, &cli.server, cli.json, cli.pretty, &tls_config).await?
         }
         Commands::DeployHistory { node_id, limit } => {
             handle_deploy_history(&cli.server, &node_id, limit, cli.json, &tls_config).await?
@@ -489,7 +493,7 @@ async fn main() -> Result<()> {
             .await?
         }
         Commands::Template { action } => {
-            handle_template(action, &cli.server, cli.json, &tls_config).await?
+            handle_template(action, &cli.server, cli.json, cli.pretty, &tls_config).await?
         }
         Commands::Version => {
             println!("pacinet {}", env!("CARGO_PKG_VERSION"));
@@ -794,6 +798,7 @@ async fn handle_policy(
     action: PolicyCommands,
     server: &str,
     as_json: bool,
+    pretty: bool,
     tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) -> Result<()> {
     let mut client = connect(server, tls_config).await?;
@@ -807,7 +812,7 @@ async fn handle_policy(
                 .await?
                 .into_inner();
 
-            if as_json {
+            if as_json && !pretty {
                 let val = json!({
                     "node_id": response.node_id,
                     "rules_yaml": response.rules_yaml,
@@ -1688,6 +1693,7 @@ async fn handle_template(
     action: TemplateCommands,
     server: &str,
     as_json: bool,
+    pretty: bool,
     tls_config: &Option<pacinet_core::tls::TlsConfig>,
 ) -> Result<()> {
     let mut client = connect(server, tls_config).await?;
@@ -1768,7 +1774,7 @@ async fn handle_template(
                 .await?
                 .into_inner();
 
-            if as_json {
+            if as_json && !pretty {
                 let val = json!({
                     "name": response.name,
                     "description": response.description,

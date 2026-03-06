@@ -3,7 +3,7 @@
 use crate::metrics as m;
 use crate::storage::blocking;
 use pacinet_core::fsm::{ActionResult, NodeActionResult};
-use pacinet_core::model::{DeploymentRecord, DeploymentResult, Node, Policy};
+use pacinet_core::model::{DeploymentRecord, DeploymentResult, Node, NodeState, Policy};
 use pacinet_core::Storage;
 use pacinet_proto::*;
 use std::sync::Arc;
@@ -40,6 +40,67 @@ pub async fn deploy_to_node(
 
     let deploy_start = tokio::time::Instant::now();
     let policy_hash = pacinet_core::policy_hash(rules_yaml);
+
+    // No-op dedupe: if node is already active with identical policy + compile options,
+    // skip creating a new policy version and avoid redundant agent deploy.
+    let nid = node.node_id.clone();
+    let current_policy = match blocking(storage, move |s| s.get_policy(&nid)).await {
+        Ok(p) => p,
+        Err(e) => {
+            return DeployOutcome {
+                success: false,
+                message: format!("Failed to read current policy: {}", e),
+                warnings: vec![],
+                result: DeploymentResult::AgentFailure,
+                version: 0,
+            };
+        }
+    };
+    if matches!(node.state, NodeState::Active)
+        && current_policy
+            .as_ref()
+            .map(|p| policy_matches_request(p, rules_yaml, &policy_hash, &options))
+            .unwrap_or(false)
+    {
+        let nid = node.node_id.clone();
+        let current_version = match blocking(storage, move |s| s.get_policy_history(&nid, 1)).await {
+            Ok(v) => v.first().map(|p| p.version).unwrap_or(0),
+            Err(e) => {
+                return DeployOutcome {
+                    success: false,
+                    message: format!("Failed to read policy history: {}", e),
+                    warnings: vec![],
+                    result: DeploymentResult::AgentFailure,
+                    version: 0,
+                };
+            }
+        };
+
+        let message =
+            "No change: identical policy and options already active; skipped redeploy".to_string();
+
+        // Keep deployment history/audit visibility for no-op requests.
+        let record = DeploymentRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            node_id: node.node_id.clone(),
+            policy_version: current_version,
+            policy_hash: policy_hash.clone(),
+            deployed_at: chrono::Utc::now(),
+            result: DeploymentResult::Success,
+            message: message.clone(),
+        };
+        let _ = blocking(storage, move |s| s.record_deployment(record)).await;
+
+        m::record_deploy("success", deploy_start.elapsed().as_secs_f64());
+
+        return DeployOutcome {
+            success: true,
+            message,
+            warnings: vec![],
+            result: DeploymentResult::Success,
+            version: current_version,
+        };
+    }
 
     // Store policy
     let policy = Policy {
@@ -179,6 +240,30 @@ pub async fn deploy_to_node(
         result: deploy_result,
         version,
     }
+}
+
+fn policy_matches_request(
+    current: &Policy,
+    rules_yaml: &str,
+    policy_hash: &str,
+    options: &CompileOptions,
+) -> bool {
+    current.rules_yaml == rules_yaml
+        && current.policy_hash == policy_hash
+        && current.counters_enabled == options.counters
+        && current.rate_limit_enabled == options.rate_limit
+        && current.conntrack_enabled == options.conntrack
+        && current.axi_enabled == options.axi
+        && current.ports == options.ports
+        && current.target == options.target
+        && current.dynamic == options.dynamic
+        && current.dynamic_entries == options.dynamic_entries
+        && current.width == options.width
+        && current.ptp == options.ptp
+        && current.rss == options.rss
+        && current.rss_queues == options.rss_queues
+        && current.int == options.int_enabled
+        && current.int_switch_id == options.int_switch_id
 }
 
 fn ensure_node_capabilities(node: &Node, options: &CompileOptions) -> Result<(), String> {

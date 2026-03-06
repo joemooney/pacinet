@@ -7,6 +7,7 @@ import Badge from '../ui/Badge';
 import Spinner from '../ui/Spinner';
 
 export default function TemplatesPage() {
+  const suggestedTags = ['baseline', 'allowlist', 'l2', 'ipv4', 'ipv6', 'observability', 'security'];
   const [tag, setTag] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
@@ -39,6 +40,15 @@ export default function TemplatesPage() {
     if (confirm(`Delete template "${templateName}"?`)) {
       deleteTemplate.mutate(templateName);
     }
+  };
+
+  const addSuggestedTag = (tagName: string) => {
+    const existing = tags
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (existing.includes(tagName)) return;
+    setTags(existing.length > 0 ? `${existing.join(', ')}, ${tagName}` : tagName);
   };
 
   return (
@@ -93,6 +103,18 @@ export default function TemplatesPage() {
                 placeholder="firewall, production"
                 className="w-full px-3 py-2 bg-surface border border-edge rounded-lg text-sm text-content placeholder:text-content-muted focus:outline-none focus:border-accent"
               />
+              <div className="mt-2 flex flex-wrap gap-1">
+                {suggestedTags.map((st) => (
+                  <button
+                    key={st}
+                    type="button"
+                    onClick={() => addSuggestedTag(st)}
+                    className="text-[10px] px-2 py-0.5 rounded bg-surface-hover text-content-secondary hover:text-content"
+                  >
+                    + {st}
+                  </button>
+                ))}
+              </div>
             </div>
             <div>
               <label className="block text-xs text-content-muted mb-1">Rules YAML</label>
@@ -100,9 +122,22 @@ export default function TemplatesPage() {
                 value={rulesYaml}
                 onChange={(e) => setRulesYaml(e.target.value)}
                 rows={10}
-                placeholder="rules:&#10;  - name: drop_ssh&#10;    action: drop"
+                placeholder={`pacgate:
+  version: "1.0"
+  defaults:
+    action: drop
+  rules:
+    - name: allow_https_\${SITE}
+      type: stateless
+      priority: 100
+      match:
+        ethertype: "0x0800"
+      action: pass`}
                 className="w-full px-3 py-2 bg-surface border border-edge rounded-lg text-sm font-mono text-content placeholder:text-content-muted focus:outline-none focus:border-accent resize-y"
               />
+              <p className="mt-2 text-xs text-content-muted">
+                Use variables like <code>{'${SITE}'}</code> or <code>{'${CIDR}'}</code> for reusable templates.
+              </p>
             </div>
             <Button onClick={handleCreate} disabled={createTemplate.isPending || !name || !rulesYaml}>
               {createTemplate.isPending ? 'Creating...' : 'Create Template'}

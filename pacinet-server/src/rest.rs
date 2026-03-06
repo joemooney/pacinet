@@ -37,6 +37,7 @@ pub struct AppState {
     pub event_bus: EventBus,
     pub tls_config: Option<pacinet_core::tls::TlsConfig>,
     pub api_key: Option<String>,
+    pub ui_theme: Arc<tokio::sync::RwLock<String>>,
 }
 
 // ============================================================================
@@ -230,6 +231,11 @@ pub struct FsmTransitionJson {
 pub struct SuccessResponse {
     pub success: bool,
     pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct UiThemeResponse {
+    pub theme: String,
 }
 
 #[derive(Serialize)]
@@ -535,6 +541,11 @@ pub struct CancelFsmRequest {
     pub reason: String,
 }
 
+#[derive(Deserialize)]
+pub struct SetUiThemeRequest {
+    pub theme: String,
+}
+
 // ============================================================================
 // Query parameter types
 // ============================================================================
@@ -775,6 +786,8 @@ pub fn router(state: AppState) -> Router {
         )
         // Fleet
         .route("/api/fleet", get(get_fleet_status))
+        // UI theme bridge
+        .route("/api/ui/theme", get(get_ui_theme).post(set_ui_theme))
         // Counters
         .route("/api/counters", get(get_aggregate_counters))
         .route("/api/flow-counters", get(get_aggregate_flow_counters))
@@ -821,6 +834,32 @@ pub fn router(state: AppState) -> Router {
         .with_state(state);
 
     health_routes.merge(api_routes).layer(cors)
+}
+
+async fn get_ui_theme(State(state): State<AppState>) -> Json<UiThemeResponse> {
+    let theme = state.ui_theme.read().await.clone();
+    Json(UiThemeResponse { theme })
+}
+
+async fn set_ui_theme(
+    State(state): State<AppState>,
+    Json(body): Json<SetUiThemeRequest>,
+) -> Result<Json<SuccessResponse>, AppError> {
+    let theme = body.theme.trim().to_ascii_lowercase();
+    if theme != "dark" && theme != "light" {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "theme must be 'dark' or 'light'".to_string(),
+        ));
+    }
+    {
+        let mut slot = state.ui_theme.write().await;
+        *slot = theme.clone();
+    }
+    Ok(Json(SuccessResponse {
+        success: true,
+        message: format!("UI theme set to {}", theme),
+    }))
 }
 
 // ============================================================================
@@ -1120,14 +1159,27 @@ async fn rollback_policy(
     // Release deploy guard
     state.storage.end_deploy(&id);
 
+    let no_change = outcome.message.starts_with("No change:");
     Ok(Json(RollbackResponse {
         success: outcome.success,
         message: if outcome.success {
-            format!("Rolled back to version {}", target_version)
+            if no_change {
+                outcome.message
+            } else {
+                format!("Rolled back to version {}", target_version)
+            }
         } else {
             outcome.message
         },
-        version: if outcome.success { target_version } else { 0 },
+        version: if outcome.success {
+            if no_change {
+                versions.first().map(|v| v.version).unwrap_or(target_version)
+            } else {
+                target_version
+            }
+        } else {
+            0
+        },
     }))
 }
 

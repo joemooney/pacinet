@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../api/client';
-import { useRemoveNode } from '../../hooks/useNodes';
+import { useRemoveNode, useRollbackPolicy } from '../../hooks/useNodes';
 import { useSetAnnotations } from '../../hooks/useAnnotations';
 import { formatTimestamp, formatDuration, stateColorClass, statusColorClass, shortId } from '../../lib/utils';
 import type { NodeJson, PolicyJson, CounterJson, DeploymentJson } from '../../types/api';
@@ -17,6 +17,7 @@ interface NodeDetailProps {
 }
 
 export default function NodeDetail({ nodeId, onClose }: NodeDetailProps) {
+  const [rollbackVersion, setRollbackVersion] = useState('');
   const { data: node, isLoading } = useQuery({
     queryKey: ['node', nodeId],
     queryFn: () => apiFetch<NodeJson>(`/api/nodes/${nodeId}`),
@@ -38,11 +39,38 @@ export default function NodeDetail({ nodeId, onClose }: NodeDetailProps) {
   });
 
   const removeNode = useRemoveNode();
+  const rollbackPolicy = useRollbackPolicy();
 
   const handleRemove = () => {
     if (confirm(`Remove node ${node?.hostname || nodeId}?`)) {
       removeNode.mutate(nodeId, { onSuccess: onClose });
     }
+  };
+
+  const handleRollback = () => {
+    const parsed = rollbackVersion.trim() ? Number(rollbackVersion) : undefined;
+    if (parsed !== undefined && (!Number.isInteger(parsed) || parsed < 1)) {
+      window.alert('Rollback version must be a positive integer.');
+      return;
+    }
+
+    const target = parsed ? `version ${parsed}` : 'previous version';
+    if (!confirm(`Rollback node ${node?.hostname || nodeId} to ${target}?`)) {
+      return;
+    }
+
+    rollbackPolicy.mutate(
+      { nodeId, targetVersion: parsed },
+      {
+        onSuccess: (resp) => {
+          window.alert(resp.message);
+          setRollbackVersion('');
+        },
+        onError: (err) => {
+          window.alert((err as Error).message);
+        },
+      }
+    );
   };
 
   if (isLoading) return <DetailPanel onClose={onClose}><Spinner /></DetailPanel>;
@@ -87,6 +115,27 @@ export default function NodeDetail({ nodeId, onClose }: NodeDetailProps) {
           <Card title="Active Policy">
             <div className="text-xs text-content-muted mb-2">
               Hash: <span className="font-mono">{policy.policy_hash}</span> | Deployed: {formatTimestamp(policy.deployed_at)}
+            </div>
+            <div className="mb-3 flex flex-wrap items-end gap-2">
+              <label className="text-xs text-content-muted">
+                Rollback target version (optional)
+                <input
+                  type="number"
+                  min={1}
+                  value={rollbackVersion}
+                  onChange={(e) => setRollbackVersion(e.target.value)}
+                  placeholder="previous"
+                  className="mt-1 w-40 px-2 py-1 bg-surface border border-edge rounded text-xs text-content"
+                />
+              </label>
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={handleRollback}
+                disabled={rollbackPolicy.isPending}
+              >
+                {rollbackPolicy.isPending ? 'Rolling back...' : 'Rollback Policy'}
+              </Button>
             </div>
             <pre className="bg-surface p-3 rounded-lg text-xs font-mono overflow-x-auto max-h-48 text-content-secondary">
               {policy.rules_yaml}

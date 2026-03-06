@@ -761,14 +761,27 @@ impl paci_net_management_server::PaciNetManagement for ManagementService {
         match result {
             Ok(resp) => {
                 let inner = resp.into_inner();
+                let no_change = inner.message.starts_with("No change:");
                 Ok(Response::new(RollbackPolicyResponse {
                     success: inner.success,
                     message: if inner.success {
-                        format!("Rolled back to version {}", target_version)
+                        if no_change {
+                            inner.message
+                        } else {
+                            format!("Rolled back to version {}", target_version)
+                        }
                     } else {
                         inner.message
                     },
-                    rolled_back_to_version: if inner.success { target_version } else { 0 },
+                    rolled_back_to_version: if inner.success {
+                        if no_change {
+                            versions.first().map(|v| v.version).unwrap_or(target_version)
+                        } else {
+                            target_version
+                        }
+                    } else {
+                        0
+                    },
                 }))
             }
             Err(status) => Ok(Response::new(RollbackPolicyResponse {
